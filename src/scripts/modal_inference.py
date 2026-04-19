@@ -1,203 +1,228 @@
-import modal
+import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
+
+import modal
 
 app = modal.App("jaide-v40-inference")
 
+LOCAL_SRC_DIR = (Path(__file__).resolve().parent / "..").resolve()
+
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install(
-        "build-essential",
-        "wget",
-        "curl",
-        "ca-certificates",
-        "xz-utils"
+    modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
+    .run_commands(
+        "DEBIAN_FRONTEND=noninteractive apt-get update",
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages "
+        "build-essential wget curl ca-certificates xz-utils libgomp1 opam ocaml",
+        "rm -rf /var/lib/apt/lists/*",
     )
     .run_commands(
-        "wget -q https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz -O /tmp/zig.tar.xz",
-        "tar -xJf /tmp/zig.tar.xz -C /usr/local",
-        "ln -s /usr/local/zig-linux-x86_64-0.11.0/zig /usr/local/bin/zig",
-        "rm /tmp/zig.tar.xz"
+        "curl -sSf https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz",
+        "tar -xf /tmp/zig.tar.xz -C /tmp",
+        "mv /tmp/zig-linux-x86_64-0.13.0 /usr/local/zig",
+        "ln -sf /usr/local/zig/zig /usr/local/bin/zig",
+        "zig version",
+        "opam init --disable-sandboxing -y",
+        "eval $(opam env) && opam install -y futhark || true",
     )
-    .add_local_dir("../../src", "/jaide_src")
+    .add_local_dir(
+        str(LOCAL_SRC_DIR),
+        remote_path="/jaide_src",
+        copy=True,
+    )
+    .run_commands(
+        "eval $(opam env) && futhark c /jaide_src/hw/accel/futhark_kernels.fut "
+        "-o /jaide_src/hw/accel/futhark_kernels.c 2>&1 | tail -5 || true",
+        "zig build-exe /jaide_src/main.zig --main-pkg-path /jaide_src "
+        "-O ReleaseFast -fstrip -femit-bin=/root/jaide -lc 2>&1 | tail -20 || echo 'Will build at runtime'",
+        "ls /root/jaide 2>/dev/null && echo 'Inference binary ready' || echo 'Will build at runtime'",
+    )
 )
 
 volume = modal.Volume.from_name("jaide-training-data", create_if_missing=True)
+models_volume = modal.Volume.from_name("jaide-training-data", create_if_missing=True)
+
+MODELS_DIR = Path("/models")
+BINARY_PATH = Path("/root/jaide")
+SRC_DIR = Path("/jaide_src")
+
+
+def _runtime_build_inference() -> None:
+    if BINARY_PATH.is_file():
+        return
+    import subprocess
+    futhark_c = SRC_DIR / "hw/accel/futhark_kernels.c"
+    if not futhark_c.is_file():
+        subprocess.run(
+            ["bash", "-c", f"eval $(opam env) && futhark c {SRC_DIR}/hw/accel/futhark_kernels.fut -o {futhark_c}"],
+            capture_output=True,
+        )
+    r = subprocess.run(
+        ["zig", "build-exe", str(SRC_DIR / "main.zig"),
+         "--main-pkg-path", str(SRC_DIR),
+         "-O", "ReleaseFast", "-fstrip",
+         f"-femit-bin={BINARY_PATH}", "-lc"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"Inference build failed:\n{r.stderr[:4000]}")
+
 
 @app.function(
     image=image,
     gpu="B200:1",
-    volumes={"/data": volume},
+    volumes={str(MODELS_DIR): models_volume},
     cpu=16,
     memory=65536,
     timeout=3600,
-
 )
 def inference(
     prompt: str,
     model_filename: str,
     max_tokens: int = 256,
-    temperature: float = 1.0
+    temperature: float = 1.0,
 ) -> Dict[str, Any]:
     import subprocess
-    import shutil
 
-    work_dir = Path("/workspace")
-    work_dir.mkdir(exist_ok=True)
+    models_volume.reload()
+    _runtime_build_inference()
 
-    src_target = work_dir / "jaide40" / "jaide" / "src"
-    src_target.mkdir(parents=True, exist_ok=True)
-
-    src_path = Path("/jaide_src")
-    for item in src_path.rglob("*"):
-        if item.is_file():
-            rel_path = item.relative_to(src_path)
-            target_path = src_target / rel_path
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, target_path)
-
-    os.chdir(work_dir)
-
-    build_result = subprocess.run(
-        [
-            "zig", "build-exe",
-            str(src_target / "main.zig"),
-            "-O", "ReleaseFast",
-            "-fstrip"
-        ],
-        capture_output=True,
-        text=True
-    )
-
-    if build_result.returncode != 0:
-        return {
-            "status": "build_failed",
-            "error": build_result.stderr
-        }
-
-    binary_path = work_dir / "main"
-    model_path = Path("/data/models") / model_filename
-
-    if not model_path.exists():
+    model_path = MODELS_DIR / Path(model_filename).name
+    if not model_path.is_file():
         return {
             "status": "model_not_found",
-            "error": f"Model file not found: {model_filename}"
+            "error": f"Model not found: {model_filename}",
+            "prompt": prompt,
+            "output": None,
+            "inference_time_seconds": 0.0,
         }
 
     infer_args = [
-        str(binary_path),
+        str(BINARY_PATH),
         "--mode", "infer",
         "--model", str(model_path),
         "--prompt", prompt,
-        "--max-tokens", str(max_tokens)
+        "--max-tokens", str(max_tokens),
+        "--temperature", str(temperature),
     ]
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = "0"
 
     start_time = time.time()
-
-    infer_result = subprocess.run(
-        infer_args,
-        capture_output=True,
-        text=True,
-        env=env
-    )
-
+    result = subprocess.run(infer_args, capture_output=True, text=True, env=env)
     end_time = time.time()
 
     return {
-        "status": "completed" if infer_result.returncode == 0 else "failed",
+        "status": "completed" if result.returncode == 0 else "failed",
         "prompt": prompt,
-        "output": infer_result.stdout,
-        "error": infer_result.stderr if infer_result.returncode != 0 else None,
+        "output": result.stdout,
+        "error": result.stderr if result.returncode != 0 else None,
         "inference_time_seconds": end_time - start_time,
         "max_tokens": max_tokens,
-        "model": model_filename
+        "model": model_filename,
     }
+
 
 @app.function(
     image=image,
-    gpu=modal.gpu.H100(count=1),
-    volumes={"/data": volume},
-    mounts=[jaide_source_mount],
+    gpu="B200:1",
+    volumes={str(MODELS_DIR): models_volume},
     cpu=16,
     memory=65536,
     timeout=7200,
-
 )
 def batch_inference(
     prompts: List[str],
     model_filename: str,
-    max_tokens: int = 256
+    max_tokens: int = 256,
 ) -> Dict[str, Any]:
+    import subprocess
+
+    models_volume.reload()
+    _runtime_build_inference()
+
+    model_path = MODELS_DIR / Path(model_filename).name
+    if not model_path.is_file():
+        return {"status": "model_not_found", "results": [], "total_prompts": len(prompts)}
+
     results = []
     total_start = time.time()
 
     for idx, prompt in enumerate(prompts):
-        result = inference.local(
-            prompt=prompt,
-            model_filename=model_filename,
-            max_tokens=max_tokens
-        )
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = "0"
+        infer_args = [
+            str(BINARY_PATH),
+            "--mode", "infer",
+            "--model", str(model_path),
+            "--prompt", prompt,
+            "--max-tokens", str(max_tokens),
+        ]
+        t0 = time.time()
+        r = subprocess.run(infer_args, capture_output=True, text=True, env=env)
         results.append({
             "index": idx,
             "prompt": prompt,
-            "result": result
+            "status": "completed" if r.returncode == 0 else "failed",
+            "output": r.stdout,
+            "error": r.stderr if r.returncode != 0 else None,
+            "time_seconds": time.time() - t0,
         })
 
     total_end = time.time()
-
     return {
         "total_prompts": len(prompts),
         "total_time_seconds": total_end - total_start,
-        "average_time_per_prompt": (total_end - total_start) / len(prompts) if prompts else 0,
-        "results": results
+        "average_time_per_prompt": (total_end - total_start) / max(len(prompts), 1),
+        "results": results,
     }
+
 
 @app.local_entrypoint()
 def main(
     prompt: str = "Mi az általános relativitáselmélet lényege?",
-    model: str = None,
-    max_tokens: int = 256
-):
+    model: Optional[str] = None,
+    max_tokens: int = 256,
+) -> None:
     from modal_train import list_models
 
     if model is None:
-        print("Fetching latest model...")
+        print("Fetching latest model from volume...")
         models_info = list_models.remote()
-        if not models_info["models"]:
-            print("No trained models found. Run training first.")
+        model_list = models_info.get("models", [])
+        if not model_list:
+            print("No trained models found. Run training first:")
+            print("  modal run modal_train.py")
             return
-        model = models_info["models"][0]["filename"]
-        print(f"Using latest model: {model}")
+        model = model_list[0]["filename"]
+        print(f"Using: {model}")
 
-    print("="*70)
-    print("JAIDE v40 Inference on B200 GPU")
-    print("="*70)
-    print(f"Model: {model}")
-    print(f"Prompt: {prompt}")
+    sep = "=" * 70
+    print(sep)
+    print("JAIDE v40 — Inference on B200 GPU")
+    print(sep)
+    print(f"Model:      {model}")
+    print(f"Prompt:     {prompt}")
     print(f"Max Tokens: {max_tokens}")
-    print("="*70)
+    print(sep)
 
     result = inference.remote(
         prompt=prompt,
         model_filename=model,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
     )
 
-    print("\n" + "="*70)
-    print("INFERENCE RESULT")
-    print("="*70)
+    print(f"\n{sep}")
+    print("RESULT")
+    print(sep)
     print(f"Status: {result['status']}")
-    print(f"Inference Time: {result['inference_time_seconds']:.3f} seconds")
-
-    if result['status'] == 'completed':
+    print(f"Time:   {result['inference_time_seconds']:.3f}s")
+    if result["status"] == "completed":
         print(f"\nPrompt: {result['prompt']}")
         print(f"\nOutput:\n{result['output']}")
     else:
-        print(f"\nError: {result['error']}")
-
-    print("="*70)
+        print(f"\nError: {result.get('error')}")
+    print(sep)

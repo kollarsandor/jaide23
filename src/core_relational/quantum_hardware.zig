@@ -984,17 +984,17 @@ pub const QuantumCircuit = struct {
         try self.addInstruction(inst);
     }
 
-    pub fn u1(self: *Self, qubit: u32, theta: f64) !void {
+    pub fn @"u1"(self: *Self, qubit: u32, theta: f64) !void {
         const inst = try QuantumInstruction.init(self.allocator, .U1, &[_]u32{qubit}, &[_]f64{theta});
         try self.addInstruction(inst);
     }
 
-    pub fn u2(self: *Self, qubit: u32, phi: f64, lam: f64) !void {
+    pub fn @"u2"(self: *Self, qubit: u32, phi: f64, lam: f64) !void {
         const inst = try QuantumInstruction.init(self.allocator, .U2, &[_]u32{qubit}, &[_]f64{phi, lam});
         try self.addInstruction(inst);
     }
 
-    pub fn u3(self: *Self, qubit: u32, theta: f64, phi: f64, lam: f64) !void {
+    pub fn @"u3"(self: *Self, qubit: u32, theta: f64, phi: f64, lam: f64) !void {
         const inst = try QuantumInstruction.init(self.allocator, .U3, &[_]u32{qubit}, &[_]f64{theta, phi, lam});
         try self.addInstruction(inst);
     }
@@ -1680,35 +1680,35 @@ pub const IBMQuantumClient = struct {
         result.execution_time_ms = job.end_time.? - job.start_time.?;
     }
 
-    fn apply1QubitGate(state: []std.math.Complex(f64), qubit: u32, u00: std.math.Complex(f64), u01: std.math.Complex(f64), u10: std.math.Complex(f64), u11: std.math.Complex(f64)) void {
+    fn apply1QubitGate(state: []std.math.Complex(f64), qubit: u32, m00: std.math.Complex(f64), m01: std.math.Complex(f64), m10: std.math.Complex(f64), m11: std.math.Complex(f64)) void {
         const n = state.len;
         const bit: usize = @as(usize, 1) << @intCast(qubit);
         var i: usize = 0;
         while (i < n) : (i += 1) {
             if ((i & bit) == 0) {
-                const i0 = i;
-                const i1 = i | bit;
-                const a = state[i0];
-                const b = state[i1];
-                state[i0] = a.mul(u00).add(b.mul(u01));
-                state[i1] = a.mul(u10).add(b.mul(u11));
+                const idx0 = i;
+                const idx1 = i | bit;
+                const a = state[idx0];
+                const b = state[idx1];
+                state[idx0] = a.mul(m00).add(b.mul(m01));
+                state[idx1] = a.mul(m10).add(b.mul(m11));
             }
         }
     }
 
-    fn applyControlled1QubitGate(state: []std.math.Complex(f64), ctrl: u32, target: u32, u00: std.math.Complex(f64), u01: std.math.Complex(f64), u10: std.math.Complex(f64), u11: std.math.Complex(f64)) void {
+    fn applyControlled1QubitGate(state: []std.math.Complex(f64), ctrl: u32, target: u32, m00: std.math.Complex(f64), m01: std.math.Complex(f64), m10: std.math.Complex(f64), m11: std.math.Complex(f64)) void {
         const n = state.len;
         const cbit: usize = @as(usize, 1) << @intCast(ctrl);
         const tbit: usize = @as(usize, 1) << @intCast(target);
         var i: usize = 0;
         while (i < n) : (i += 1) {
             if ((i & cbit) != 0 and (i & tbit) == 0) {
-                const i0 = i;
-                const i1 = i | tbit;
-                const a = state[i0];
-                const b = state[i1];
-                state[i0] = a.mul(u00).add(b.mul(u01));
-                state[i1] = a.mul(u10).add(b.mul(u11));
+                const idx0 = i;
+                const idx1 = i | tbit;
+                const a = state[idx0];
+                const b = state[idx1];
+                state[idx0] = a.mul(m00).add(b.mul(m01));
+                state[idx1] = a.mul(m10).add(b.mul(m11));
             }
         }
     }
