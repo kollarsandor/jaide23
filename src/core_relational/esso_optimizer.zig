@@ -30,14 +30,27 @@ fn nowNs() i64 {
     return @intCast(t);
 }
 
+fn normalizeAngle(angle: f64) f64 {
+    var result = @mod(angle, 2.0 * std.math.pi);
+    if (result < 0.0) result += 2.0 * std.math.pi;
+    return result;
+}
+
+fn finiteOr(value: f64, fallback: f64) f64 {
+    return if (std.math.isFinite(value)) value else fallback;
+}
+
 pub fn cloneGraph(allocator: Allocator, source: *const SelfSimilarRelationalGraph) !SelfSimilarRelationalGraph {
     var new_graph = try SelfSimilarRelationalGraph.init(allocator);
     errdefer new_graph.deinit();
 
     var node_iter = source.nodes.iterator();
     while (node_iter.next()) |entry| {
-        const cloned_node = try entry.value_ptr.clone(allocator);
+        var cloned_node = try entry.value_ptr.clone(allocator);
+        var added = false;
+        errdefer if (!added) cloned_node.deinit();
         try new_graph.addNode(cloned_node);
+        added = true;
     }
 
     var edge_iter = source.edges.iterator();
@@ -51,7 +64,7 @@ pub fn cloneGraph(allocator: Allocator, source: *const SelfSimilarRelationalGrap
         }
     }
 
-    @memcpy(&new_graph.topology_hash, &source.topology_hash);
+    new_graph.topology_hash = source.topology_hash;
 
     return new_graph;
 }
@@ -122,6 +135,12 @@ const SymmetryTransform = struct {
 
     const Self = @This();
 
+    const Affine = struct {
+        m: [2][2]f64,
+        tx: f64,
+        ty: f64,
+    };
+
     pub fn init(group: SymmetryGroup) Self {
         return Self{
             .group = group,
@@ -133,12 +152,13 @@ const SymmetryTransform = struct {
     }
 
     pub fn initWithParams(group: SymmetryGroup, params: [4]f64) Self {
+        const safe_scale = if (std.math.isFinite(params[2]) and params[2] > 0.0) params[2] else 1.0;
         return Self{
             .group = group,
-            .origin_x = params[0],
-            .origin_y = params[1],
-            .parameters = params,
-            .scale_factor = if (params[2] > 0.0) params[2] else 1.0,
+            .origin_x = finiteOr(params[0], 0.0),
+            .origin_y = finiteOr(params[1], 0.0),
+            .parameters = [4]f64{ finiteOr(params[0], 0.0), finiteOr(params[1], 0.0), safe_scale, finiteOr(params[3], 0.0) },
+            .scale_factor = safe_scale,
         };
     }
 
@@ -158,8 +178,8 @@ const SymmetryTransform = struct {
 
         return switch (self.group) {
             .identity => .{
-                .x = x,
-                .y = y,
+                .x = self.origin_x + dx * self.scale_factor,
+                .y = self.origin_y + dy * self.scale_factor,
             },
             .reflection => .{
                 .x = self.origin_x + (dx * @cos(2.0 * self.parameters[3]) + dy * @sin(2.0 * self.parameters[3])) * self.scale_factor,
@@ -215,13 +235,11 @@ const SymmetryTransform = struct {
                 new_phase = -state.phase + 2.0 * self.parameters[3];
             },
             .rotation_90, .rotation_180, .rotation_270, .custom_rotation => {
-                const angle = self.effectiveAngle() + self.parameters[3];
-                new_phase = state.phase + angle;
+                new_phase = state.phase + self.effectiveAngle();
             },
         }
 
-        new_phase = @mod(new_phase, 2.0 * std.math.pi);
-        if (new_phase < 0.0) new_phase += 2.0 * std.math.pi;
+        new_phase = normalizeAngle(new_phase);
 
         return QuantumState{
             .amplitude_real = new_real,
@@ -232,105 +250,176 @@ const SymmetryTransform = struct {
     }
 
     pub fn inverse(self: *const Self) Self {
-        const inv_scale = if (self.scale_factor != 0.0) 1.0 / self.scale_factor else 1.0;
+        const inv_scale = if (self.scale_factor != 0.0 and std.math.isFinite(self.scale_factor)) 1.0 / self.scale_factor else 1.0;
         return switch (self.group) {
-            .identity => self.*,
+            .identity => Self{
+                .group = .identity,
+                .origin_x = self.origin_x,
+                .origin_y = self.origin_y,
+                .parameters = [4]f64{ self.origin_x, self.origin_y, inv_scale, self.parameters[3] },
+                .scale_factor = inv_scale,
+            },
             .reflection => Self{
                 .group = .reflection,
                 .origin_x = self.origin_x,
                 .origin_y = self.origin_y,
-                .parameters = self.parameters,
+                .parameters = [4]f64{ self.origin_x, self.origin_y, inv_scale, self.parameters[3] },
                 .scale_factor = inv_scale,
             },
             .rotation_90 => Self{
                 .group = .rotation_270,
                 .origin_x = self.origin_x,
                 .origin_y = self.origin_y,
-                .parameters = self.parameters,
+                .parameters = [4]f64{ self.origin_x, self.origin_y, inv_scale, self.parameters[3] },
                 .scale_factor = inv_scale,
             },
             .rotation_180 => Self{
                 .group = .rotation_180,
                 .origin_x = self.origin_x,
                 .origin_y = self.origin_y,
-                .parameters = self.parameters,
+                .parameters = [4]f64{ self.origin_x, self.origin_y, inv_scale, self.parameters[3] },
                 .scale_factor = inv_scale,
             },
             .rotation_270 => Self{
                 .group = .rotation_90,
                 .origin_x = self.origin_x,
                 .origin_y = self.origin_y,
-                .parameters = self.parameters,
+                .parameters = [4]f64{ self.origin_x, self.origin_y, inv_scale, self.parameters[3] },
                 .scale_factor = inv_scale,
             },
             .custom_rotation => Self{
                 .group = .custom_rotation,
                 .origin_x = self.origin_x,
                 .origin_y = self.origin_y,
-                .parameters = [4]f64{ self.parameters[0], self.parameters[1], self.parameters[2], -self.parameters[3] },
+                .parameters = [4]f64{ self.origin_x, self.origin_y, inv_scale, -self.parameters[3] },
                 .scale_factor = inv_scale,
             },
             .translation => Self{
                 .group = .translation,
                 .origin_x = self.origin_x,
                 .origin_y = self.origin_y,
-                .parameters = [4]f64{ -self.parameters[0], -self.parameters[1], self.parameters[2], self.parameters[3] },
-                .scale_factor = inv_scale,
+                .parameters = [4]f64{ -self.parameters[0] * self.scale_factor, -self.parameters[1] * self.scale_factor, 1.0, self.parameters[3] },
+                .scale_factor = 1.0,
             },
         };
     }
 
-    pub fn compose(self: *const Self, other: *const Self) Self {
-        if (self.group == .identity) return other.*;
-        if (other.group == .identity) return self.*;
+    fn affine(self: *const Self) Affine {
+        const mat = self.getRotationMatrix();
+        return switch (self.group) {
+            .translation => .{
+                .m = mat,
+                .tx = self.parameters[0] * self.scale_factor,
+                .ty = self.parameters[1] * self.scale_factor,
+            },
+            else => .{
+                .m = mat,
+                .tx = self.origin_x - (mat[0][0] * self.origin_x + mat[0][1] * self.origin_y),
+                .ty = self.origin_y - (mat[1][0] * self.origin_x + mat[1][1] * self.origin_y),
+            },
+        };
+    }
 
-        if (self.group == .translation and other.group == .translation) {
-            const params = [4]f64{
-                self.parameters[0] * self.scale_factor + other.parameters[0] * other.scale_factor,
-                self.parameters[1] * self.scale_factor + other.parameters[1] * other.scale_factor,
-                self.scale_factor * other.scale_factor,
-                0.0,
+    fn originForMatrix(m: [2][2]f64, tx: f64, ty: f64, fallback_x: f64, fallback_y: f64) struct { x: f64, y: f64 } {
+        const a00 = 1.0 - m[0][0];
+        const a01 = -m[0][1];
+        const a10 = -m[1][0];
+        const a11 = 1.0 - m[1][1];
+        const det = a00 * a11 - a01 * a10;
+        if (@abs(det) > 1e-12) {
+            return .{
+                .x = (tx * a11 - a01 * ty) / det,
+                .y = (a00 * ty - tx * a10) / det,
             };
-            return Self.initWithParams(.translation, params);
         }
+        return .{ .x = fallback_x, .y = fallback_y };
+    }
 
-        const m1 = self.getRotationMatrix();
-        const m2 = other.getRotationMatrix();
+    pub fn compose(self: *const Self, other: *const Self) Self {
+        const a1 = self.affine();
+        const a2 = other.affine();
 
         const m_out = [2][2]f64{
-            [2]f64{ m1[0][0] * m2[0][0] + m1[0][1] * m2[1][0], m1[0][0] * m2[0][1] + m1[0][1] * m2[1][1] },
-            [2]f64{ m1[1][0] * m2[0][0] + m1[1][1] * m2[1][0], m1[1][0] * m2[0][1] + m1[1][1] * m2[1][1] },
+            [2]f64{ a1.m[0][0] * a2.m[0][0] + a1.m[0][1] * a2.m[1][0], a1.m[0][0] * a2.m[0][1] + a1.m[0][1] * a2.m[1][1] },
+            [2]f64{ a1.m[1][0] * a2.m[0][0] + a1.m[1][1] * a2.m[1][0], a1.m[1][0] * a2.m[0][1] + a1.m[1][1] * a2.m[1][1] },
         };
 
+        const tx_out = a1.m[0][0] * a2.tx + a1.m[0][1] * a2.ty + a1.tx;
+        const ty_out = a1.m[1][0] * a2.tx + a1.m[1][1] * a2.ty + a1.ty;
+
         const det = m_out[0][0] * m_out[1][1] - m_out[0][1] * m_out[1][0];
-        const scale = std.math.sqrt(@abs(det));
+        var scale = std.math.sqrt(@abs(det));
+        if (!std.math.isFinite(scale) or scale <= 1e-12) scale = 1.0;
+
+        const is_identity_matrix =
+            @abs(m_out[0][0] - 1.0) < 1e-10 and
+            @abs(m_out[0][1]) < 1e-10 and
+            @abs(m_out[1][0]) < 1e-10 and
+            @abs(m_out[1][1] - 1.0) < 1e-10;
+
+        if (is_identity_matrix) {
+            if (@abs(tx_out) > 1e-10 or @abs(ty_out) > 1e-10) {
+                return Self{
+                    .group = .translation,
+                    .origin_x = 0.0,
+                    .origin_y = 0.0,
+                    .parameters = [4]f64{ tx_out, ty_out, 1.0, 0.0 },
+                    .scale_factor = 1.0,
+                };
+            }
+            return Self.init(.identity);
+        }
+
+        const is_scaled_identity =
+            @abs(m_out[0][0] - scale) < 1e-10 and
+            @abs(m_out[0][1]) < 1e-10 and
+            @abs(m_out[1][0]) < 1e-10 and
+            @abs(m_out[1][1] - scale) < 1e-10;
+
+        if (is_scaled_identity) {
+            const origin = originForMatrix(m_out, tx_out, ty_out, self.origin_x, self.origin_y);
+            return Self{
+                .group = .identity,
+                .origin_x = origin.x,
+                .origin_y = origin.y,
+                .parameters = [4]f64{ origin.x, origin.y, scale, 0.0 },
+                .scale_factor = scale,
+            };
+        }
 
         var group: SymmetryGroup = .identity;
-        var params = [4]f64{ self.origin_x, self.origin_y, scale, 0.0 };
+        var angle: f64 = 0.0;
 
         if (det > 0.0) {
-            const angle = std.math.atan2(m_out[1][0], m_out[0][0]);
-            var norm_angle = @mod(angle, 2.0 * std.math.pi);
-            if (norm_angle < 0.0) norm_angle += 2.0 * std.math.pi;
-
-            if (norm_angle < 0.01 or norm_angle > 2.0 * std.math.pi - 0.01) {
+            angle = normalizeAngle(std.math.atan2(m_out[1][0], m_out[0][0]));
+            if (angle < 0.01 or angle > 2.0 * std.math.pi - 0.01) {
                 group = .identity;
-            } else if (@abs(norm_angle - std.math.pi / 2.0) < 0.01) {
+                angle = 0.0;
+            } else if (@abs(angle - std.math.pi / 2.0) < 0.01) {
                 group = .rotation_90;
-            } else if (@abs(norm_angle - std.math.pi) < 0.01) {
+                angle = 0.0;
+            } else if (@abs(angle - std.math.pi) < 0.01) {
                 group = .rotation_180;
-            } else if (@abs(norm_angle - 3.0 * std.math.pi / 2.0) < 0.01) {
+                angle = 0.0;
+            } else if (@abs(angle - 3.0 * std.math.pi / 2.0) < 0.01) {
                 group = .rotation_270;
+                angle = 0.0;
             } else {
                 group = .custom_rotation;
-                params[3] = norm_angle;
             }
         } else {
             group = .reflection;
-            params[3] = std.math.atan2(m_out[1][0], m_out[0][0]) / 2.0;
+            angle = std.math.atan2(m_out[1][0], m_out[0][0]) / 2.0;
         }
 
-        return Self.initWithParams(group, params);
+        const origin = originForMatrix(m_out, tx_out, ty_out, self.origin_x, self.origin_y);
+        return Self{
+            .group = group,
+            .origin_x = origin.x,
+            .origin_y = origin.y,
+            .parameters = [4]f64{ origin.x, origin.y, scale, angle },
+            .scale_factor = scale,
+        };
     }
 
     pub fn getRotationMatrix(self: *const Self) [2][2]f64 {
@@ -351,7 +440,7 @@ const SymmetryTransform = struct {
                 const sin_a = @sin(self.parameters[3]) * self.scale_factor;
                 return [2][2]f64{ [2]f64{ cos_a, -sin_a }, [2]f64{ sin_a, cos_a } };
             },
-            .translation => return [2][2]f64{ [2]f64{ self.scale_factor, 0.0 }, [2]f64{ 0.0, self.scale_factor } },
+            .translation => return [2][2]f64{ [2]f64{ 1.0, 0.0 }, [2]f64{ 0.0, 1.0 } },
         }
     }
 
@@ -399,8 +488,8 @@ pub const EntanglementInfo = struct {
     pub fn init(correlation: f64, phase_diff: f64) EntanglementInfo {
         const now: i64 = nowNs();
         return EntanglementInfo{
-            .correlation_strength = correlation,
-            .phase_difference = phase_diff,
+            .correlation_strength = finiteOr(correlation, 0.0),
+            .phase_difference = normalizeAngle(finiteOr(phase_diff, 0.0)),
             .creation_time = now,
             .last_update_time = now,
             .interaction_count = 1,
@@ -410,27 +499,32 @@ pub const EntanglementInfo = struct {
     pub fn update(self: *EntanglementInfo, new_correlation: f64, new_phase: f64) void {
         const count = @as(f64, @floatFromInt(self.interaction_count));
         const denom = count + 1.0;
-        self.correlation_strength = (self.correlation_strength * count + new_correlation) / denom;
+        self.correlation_strength = (self.correlation_strength * count + finiteOr(new_correlation, self.correlation_strength)) / denom;
 
-        const x = (@cos(self.phase_difference) * count + @cos(new_phase)) / denom;
-        const y = (@sin(self.phase_difference) * count + @sin(new_phase)) / denom;
+        const normalized_phase = normalizeAngle(finiteOr(new_phase, self.phase_difference));
+        const x = (@cos(self.phase_difference) * count + @cos(normalized_phase)) / denom;
+        const y = (@sin(self.phase_difference) * count + @sin(normalized_phase)) / denom;
         var new_p = std.math.atan2(y, x);
         if (new_p < 0.0) new_p += 2.0 * std.math.pi;
         self.phase_difference = new_p;
 
-        self.interaction_count += 1;
+        if (self.interaction_count < std.math.maxInt(usize)) {
+            self.interaction_count += 1;
+        }
         self.last_update_time = nowNs();
     }
 
     pub fn getAge(self: *const EntanglementInfo) i64 {
-        return nowNs() - self.creation_time;
+        const now = nowNs();
+        if (now <= self.creation_time) return 0;
+        return now - self.creation_time;
     }
 
     pub fn getDecayFactor(self: *const EntanglementInfo, half_life_ms: i64) f64 {
         if (half_life_ms <= 0) return 1.0;
         const now: i64 = nowNs();
+        if (now <= self.last_update_time) return 1.0;
         const elapsed_ns = now - self.last_update_time;
-        if (elapsed_ns <= 0) return 1.0;
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         const half_life = @as(f64, @floatFromInt(half_life_ms));
         return @exp(-std.math.ln2 * (elapsed_ms / half_life));
@@ -451,7 +545,7 @@ pub const OptimizationState = struct {
     pub fn init(allocator: Allocator, graph: *SelfSimilarRelationalGraph, energy: f64, owns_graph: bool) Self {
         return Self{
             .graph = graph,
-            .energy = energy,
+            .energy = finiteOr(energy, 0.0),
             .entanglement_percentage = 0.0,
             .iteration = 0,
             .allocator = allocator,
@@ -479,8 +573,13 @@ pub const OptimizationState = struct {
             self.entanglement_percentage = 0.0;
             return;
         }
-        const max_edges = node_count * (node_count - 1) / 2;
-        const ratio = @as(f64, @floatFromInt(self.entanglement_map.count())) / @as(f64, @floatFromInt(max_edges));
+        const node_count_f = @as(f64, @floatFromInt(node_count));
+        const max_edges_f = node_count_f * (node_count_f - 1.0) / 2.0;
+        if (max_edges_f <= 0.0) {
+            self.entanglement_percentage = 0.0;
+            return;
+        }
+        const ratio = @as(f64, @floatFromInt(self.entanglement_map.count())) / max_edges_f;
         self.entanglement_percentage = if (ratio > 1.0) 1.0 else ratio;
     }
 
@@ -540,6 +639,7 @@ pub const OptimizationState = struct {
         const pair_key = NodePairKey{ .node1 = n1, .node2 = n2 };
         if (self.entanglement_map.getPtr(pair_key)) |info| {
             info.update(new_correlation, new_phase);
+            self.refreshEntanglementPercentage();
         }
     }
 
@@ -568,11 +668,15 @@ pub const OptimizationState = struct {
         var iter = self.entanglement_map.iterator();
         while (iter.next()) |entry| {
             const key1 = try allocator.dupe(u8, entry.key_ptr.node1);
-            errdefer allocator.free(key1);
+            var key1_owned = true;
+            errdefer if (key1_owned) allocator.free(key1);
             const key2 = try allocator.dupe(u8, entry.key_ptr.node2);
-            errdefer allocator.free(key2);
+            var key2_owned = true;
+            errdefer if (key2_owned) allocator.free(key2);
             const new_key = NodePairKey{ .node1 = key1, .node2 = key2 };
             try new_state.entanglement_map.put(new_key, entry.value_ptr.*);
+            key1_owned = false;
+            key2_owned = false;
         }
 
         state_owns = false;
@@ -632,15 +736,23 @@ pub const OptimizationStatistics = struct {
     }
 
     pub fn updateAcceptanceRate(self: *Self) void {
-        const total_moves = self.moves_accepted + self.moves_rejected;
-        if (total_moves > 0) {
-            self.acceptance_rate = @as(f64, @floatFromInt(self.moves_accepted)) / @as(f64, @floatFromInt(total_moves));
+        const accepted = @as(f64, @floatFromInt(self.moves_accepted));
+        const rejected = @as(f64, @floatFromInt(self.moves_rejected));
+        const total_moves = accepted + rejected;
+        if (total_moves > 0.0) {
+            self.acceptance_rate = accepted / total_moves;
+        } else {
+            self.acceptance_rate = 0.0;
         }
     }
 
     pub fn updateElapsedTime(self: *Self) void {
         const now: i64 = nowNs();
-        self.elapsed_time_ms = @divTrunc(now - self.start_time_ns, 1_000_000);
+        if (now <= self.start_time_ns) {
+            self.elapsed_time_ms = 0;
+        } else {
+            self.elapsed_time_ms = @divTrunc(now - self.start_time_ns, 1_000_000);
+        }
     }
 
     pub fn iterationsPerSecond(self: *const Self) f64 {
@@ -649,8 +761,9 @@ pub const OptimizationStatistics = struct {
     }
 
     pub fn isConverged(self: *const Self, threshold: f64) bool {
+        const safe_threshold = if (std.math.isFinite(threshold) and threshold > 0.0) threshold else 0.0;
         const abs_delta = if (self.convergence_delta < 0.0) -self.convergence_delta else self.convergence_delta;
-        return self.moves_accepted > 0 and abs_delta < threshold and self.iterations_completed > 10;
+        return self.moves_accepted > 0 and abs_delta < safe_threshold and self.iterations_completed > 10;
     }
 };
 
@@ -674,9 +787,8 @@ pub const SymmetryPattern = struct {
         hasher.update(std.mem.asBytes(&transform.origin_y));
         hasher.update(std.mem.asBytes(&transform.scale_factor));
         hasher.update(std.mem.asBytes(&transform.parameters));
-        var id: [16]u8 = undefined;
         const hash_result = hasher.finalResult();
-        @memcpy(&id, hash_result[0..16]);
+        const id: [16]u8 = hash_result[0..16].*;
 
         return Self{
             .pattern_id = id,
@@ -725,8 +837,10 @@ pub const SymmetryPattern = struct {
         errdefer new_pattern.deinit();
         for (self.nodes.items) |node_id| {
             const id_copy = try allocator.dupe(u8, node_id);
-            errdefer allocator.free(id_copy);
+            var id_copy_owned = true;
+            errdefer if (id_copy_owned) allocator.free(id_copy);
             try new_pattern.nodes.append(id_copy);
+            id_copy_owned = false;
         }
         return new_pattern;
     }
@@ -734,7 +848,7 @@ pub const SymmetryPattern = struct {
 
 const UndoLog = struct {
     move_type: usize,
-    edge_weights: ArrayList(struct { source: []const u8, target: []const u8, weight: f64, fractal_dimension: f64 }),
+    edge_weights: ArrayList(struct { source: []const u8, target: []const u8, index: usize, weight: f64, fractal_dimension: f64 }),
     node_states: ArrayList(struct { id: []const u8, phase: f64, qubit_a: Complex(f64), qubit_b: Complex(f64) }),
     added_entanglements: ArrayList(NodePairKey),
     old_graph: ?*SelfSimilarRelationalGraph,
@@ -743,7 +857,7 @@ const UndoLog = struct {
     pub fn init(allocator: Allocator) UndoLog {
         return .{
             .move_type = 0,
-            .edge_weights = ArrayList(struct { source: []const u8, target: []const u8, weight: f64, fractal_dimension: f64 }).init(allocator),
+            .edge_weights = ArrayList(struct { source: []const u8, target: []const u8, index: usize, weight: f64, fractal_dimension: f64 }).init(allocator),
             .node_states = ArrayList(struct { id: []const u8, phase: f64, qubit_a: Complex(f64), qubit_b: Complex(f64) }).init(allocator),
             .added_entanglements = ArrayList(NodePairKey).init(allocator),
             .old_graph = null,
@@ -811,8 +925,8 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         const ts = std.time.nanoTimestamp();
         const seed = @as(u64, @truncate(@as(u128, @bitCast(ts))));
 
-        const safe_initial_temp = if (initial_temp <= 0.0) DEFAULT_INITIAL_TEMP else initial_temp;
-        const safe_cooling_rate = if (cooling_rate <= 0.0 or cooling_rate > 1.0) DEFAULT_COOLING_RATE else cooling_rate;
+        const safe_initial_temp = if (!std.math.isFinite(initial_temp) or initial_temp <= 0.0) DEFAULT_INITIAL_TEMP else initial_temp;
+        const safe_cooling_rate = if (!std.math.isFinite(cooling_rate) or cooling_rate <= 0.0 or cooling_rate > 1.0) DEFAULT_COOLING_RATE else cooling_rate;
 
         return Self{
             .initial_temperature = safe_initial_temp,
@@ -855,9 +969,11 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         if (self.current_state) |*state| {
             state.deinit();
         }
+        self.current_state = null;
         if (self.best_state) |*state| {
             state.deinit();
         }
+        self.best_state = null;
         for (self.detected_patterns.items) |*pattern| {
             pattern.deinit();
         }
@@ -876,15 +992,53 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
     }
 
     pub fn setMinTemperature(self: *Self, min_temp: f64) void {
-        self.min_temperature = if (min_temp < 1e-12) 1e-12 else min_temp;
+        self.min_temperature = if (!std.math.isFinite(min_temp) or min_temp < 1e-12) 1e-12 else min_temp;
+        if (self.temperature < self.min_temperature) {
+            self.temperature = self.min_temperature;
+        }
     }
 
     pub fn setReheatFactor(self: *Self, factor: f64) void {
-        self.reheat_factor = if (factor <= 1.0) 1.1 else factor;
+        self.reheat_factor = if (!std.math.isFinite(factor) or factor <= 1.0) 1.1 else factor;
     }
 
     pub fn setSymmetryDetectionInterval(self: *Self, interval: usize) void {
         self.symmetry_detection_interval = if (interval == 0) 1 else interval;
+        if (self.current_iteration > 0 and self.current_iteration % self.symmetry_detection_interval == 0) {
+            self.statistics.symmetries_detected = self.symmetry_transforms.items.len;
+        }
+    }
+
+    fn clearOwnedOptimizationState(self: *Self) void {
+        if (self.current_state) |*state| {
+            state.deinit();
+        }
+        self.current_state = null;
+        if (self.best_state) |*state| {
+            state.deinit();
+        }
+        self.best_state = null;
+        for (self.detected_patterns.items) |*pattern| {
+            pattern.deinit();
+        }
+        self.detected_patterns.clearRetainingCapacity();
+        self.symmetry_transforms.clearRetainingCapacity();
+        self.energy_history.clearRetainingCapacity();
+        self.temperature_history.clearRetainingCapacity();
+    }
+
+    fn appendDetectedPattern(self: *Self, graph: *const SelfSimilarRelationalGraph, transform: SymmetryTransform) !void {
+        var pattern = SymmetryPattern.init(self.allocator, transform);
+        errdefer pattern.deinit();
+        var pnode_iter = graph.nodes.iterator();
+        while (pnode_iter.next()) |entry| {
+            try pattern.addNode(entry.key_ptr.*);
+        }
+        try self.symmetry_transforms.append(transform);
+        var transform_appended = true;
+        errdefer if (transform_appended) _ = self.symmetry_transforms.pop();
+        try self.detected_patterns.append(pattern);
+        transform_appended = false;
     }
 
     pub fn optimize(self: *Self, graph: *const SelfSimilarRelationalGraph, objective_fn: ?ObjectiveFunction) !*SelfSimilarRelationalGraph {
@@ -897,18 +1051,12 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         self.current_iteration = 0;
         self.temperature = self.initial_temperature;
 
-        if (self.current_state) |*state| state.deinit();
-        if (self.best_state) |*state| state.deinit();
-        self.current_state = null;
-        self.best_state = null;
-
-        self.symmetry_transforms.clearRetainingCapacity();
-        self.energy_history.clearRetainingCapacity();
-        self.temperature_history.clearRetainingCapacity();
-        for (self.detected_patterns.items) |*pattern| pattern.deinit();
-        self.detected_patterns.clearRetainingCapacity();
+        self.clearOwnedOptimizationState();
 
         self.statistics = OptimizationStatistics.init();
+
+        var optimize_completed = false;
+        errdefer if (!optimize_completed) self.clearOwnedOptimizationState();
 
         var graph_owned_by_state = false;
         const initial_graph = try self.allocator.create(SelfSimilarRelationalGraph);
@@ -935,14 +1083,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         const initial_transforms = try self.detectSymmetries(graph);
         defer self.allocator.free(initial_transforms);
         for (initial_transforms) |transform| {
-            try self.symmetry_transforms.append(transform);
-            var pattern = SymmetryPattern.init(self.allocator, transform);
-            errdefer pattern.deinit();
-            var pnode_iter = graph.nodes.iterator();
-            while (pnode_iter.next()) |entry| {
-                try pattern.addNode(entry.key_ptr.*);
-            }
-            try self.detected_patterns.append(pattern);
+            try self.appendDetectedPattern(graph, transform);
         }
         self.statistics.symmetries_detected = self.symmetry_transforms.items.len;
 
@@ -953,6 +1094,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             const ret_graph = try self.allocator.create(SelfSimilarRelationalGraph);
             errdefer self.allocator.destroy(ret_graph);
             ret_graph.* = try cloneGraph(self.allocator, self.best_state.?.graph);
+            optimize_completed = true;
             return ret_graph;
         }
 
@@ -983,14 +1125,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
                         }
                     }
                     if (!is_duplicate) {
-                        try self.symmetry_transforms.append(transform);
-                        var pattern = SymmetryPattern.init(self.allocator, transform);
-                        errdefer pattern.deinit();
-                        var pnode_iter = self.current_state.?.graph.nodes.iterator();
-                        while (pnode_iter.next()) |entry| {
-                            try pattern.addNode(entry.key_ptr.*);
-                        }
-                        try self.detected_patterns.append(pattern);
+                        try self.appendDetectedPattern(self.current_state.?.graph, transform);
                     }
                 }
                 self.statistics.symmetries_detected = self.symmetry_transforms.items.len;
@@ -1000,7 +1135,9 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             self.current_state.?.energy = self.computeEnergy(&self.current_state.?);
             self.statistics.total_energy_evaluations += 1;
 
-            const delta_energy = self.current_state.?.energy - previous_energy;
+            const attempted_energy = self.current_state.?.energy;
+            const delta_energy = attempted_energy - previous_energy;
+            const attempted_energy_change = @abs(delta_energy);
 
             if (self.acceptMove(delta_energy, &log)) {
                 self.statistics.moves_accepted += 1;
@@ -1022,9 +1159,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
 
             self.statistics.current_energy = self.current_state.?.energy;
             self.statistics.entangled_pairs = self.current_state.?.entangledPairsCount();
-
-            const energy_change = @abs(self.current_state.?.energy - previous_energy);
-            self.statistics.convergence_delta = energy_change;
+            self.statistics.convergence_delta = attempted_energy_change;
             previous_energy = self.current_state.?.energy;
 
             self.statistics.updateAcceptanceRate();
@@ -1037,6 +1172,9 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
 
             if (stagnation_counter > stagnation_limit) {
                 self.temperature *= self.reheat_factor;
+                if (!std.math.isFinite(self.temperature)) {
+                    self.temperature = self.initial_temperature;
+                }
                 self.statistics.local_minima_escapes += 1;
                 stagnation_counter = 0;
             }
@@ -1065,14 +1203,13 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         const ret_graph = try self.allocator.create(SelfSimilarRelationalGraph);
         errdefer self.allocator.destroy(ret_graph);
         ret_graph.* = try cloneGraph(self.allocator, self.best_state.?.graph);
+        optimize_completed = true;
         return ret_graph;
     }
 
     fn computeEnergy(self: *Self, state: *const OptimizationState) f64 {
-        if (self.objective_fn) |obj_fn| {
-            return obj_fn(state);
-        }
-        return defaultGraphObjective(state);
+        const energy = if (self.objective_fn) |obj_fn| obj_fn(state) else defaultGraphObjective(state);
+        return if (std.math.isFinite(energy)) energy else std.math.inf(f64);
     }
 
     fn normalizeQubit(node: *Node) void {
@@ -1094,6 +1231,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         const state = &self.current_state.?;
         const graph = state.graph;
         log.clear();
+        errdefer self.undoMove(log);
 
         const move_type = self.prng.random().uintLessThan(usize, 7);
         log.move_type = move_type;
@@ -1102,8 +1240,8 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             0 => {
                 var edge_iter = graph.edges.iterator();
                 while (edge_iter.next()) |entry| {
-                    for (entry.value_ptr.items) |*edge| {
-                        try log.edge_weights.append(.{ .source = edge.source, .target = edge.target, .weight = edge.weight, .fractal_dimension = edge.fractal_dimension });
+                    for (entry.value_ptr.items, 0..) |*edge, edge_index| {
+                        try log.edge_weights.append(.{ .source = edge.source, .target = edge.target, .index = edge_index, .weight = edge.weight, .fractal_dimension = edge.fractal_dimension });
                         const perturbation = (self.prng.random().float(f64) - 0.5) * self.temperature * 0.1;
                         edge.weight = @max(0.0, @min(1.0, edge.weight + perturbation));
                     }
@@ -1112,12 +1250,10 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             1 => {
                 var node_iter = graph.nodes.iterator();
                 while (node_iter.next()) |entry| {
-                    var node = entry.value_ptr;
+                    const node = entry.value_ptr;
                     try log.node_states.append(.{ .id = entry.key_ptr.*, .phase = node.phase, .qubit_a = node.qubit.a, .qubit_b = node.qubit.b });
                     const phase_delta = (self.prng.random().float(f64) - 0.5) * self.temperature * 0.2;
-                    var new_phase = @mod(node.phase + phase_delta, 2.0 * std.math.pi);
-                    if (new_phase < 0.0) new_phase += 2.0 * std.math.pi;
-                    node.phase = new_phase;
+                    node.phase = normalizeAngle(node.phase + phase_delta);
                 }
             },
             2 => {
@@ -1136,7 +1272,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
 
                         var node_iter = graph.nodes.iterator();
                         while (node_iter.next()) |entry| {
-                            var node = entry.value_ptr;
+                            const node = entry.value_ptr;
                             try log.node_states.append(.{ .id = entry.key_ptr.*, .phase = node.phase, .qubit_a = node.qubit.a, .qubit_b = node.qubit.b });
 
                             const transformed_a = transform.applyToQuantumState(&QuantumState{
@@ -1157,9 +1293,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
 
                             const sx = @sin(transformed_a.phase) + @sin(transformed_b.phase);
                             const cx = @cos(transformed_a.phase) + @cos(transformed_b.phase);
-                            var combined = std.math.atan2(sx, cx);
-                            if (combined < 0.0) combined += 2.0 * std.math.pi;
-                            node.phase = combined;
+                            node.phase = normalizeAngle(std.math.atan2(sx, cx));
 
                             normalizeQubit(node);
                         }
@@ -1169,7 +1303,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             4 => {
                 var node_iter = graph.nodes.iterator();
                 while (node_iter.next()) |entry| {
-                    var node = entry.value_ptr;
+                    const node = entry.value_ptr;
                     try log.node_states.append(.{ .id = entry.key_ptr.*, .phase = node.phase, .qubit_a = node.qubit.a, .qubit_b = node.qubit.b });
 
                     const perturbation = self.temperature * 0.05;
@@ -1197,8 +1331,8 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             5 => {
                 var edge_iter = graph.edges.iterator();
                 while (edge_iter.next()) |entry| {
-                    for (entry.value_ptr.items) |*edge| {
-                        try log.edge_weights.append(.{ .source = edge.source, .target = edge.target, .weight = edge.weight, .fractal_dimension = edge.fractal_dimension });
+                    for (entry.value_ptr.items, 0..) |*edge, edge_index| {
+                        try log.edge_weights.append(.{ .source = edge.source, .target = edge.target, .index = edge_index, .weight = edge.weight, .fractal_dimension = edge.fractal_dimension });
                         const delta = (self.prng.random().float(f64) - 0.5) * self.temperature * 0.02;
                         edge.fractal_dimension = @max(0.0, @min(3.0, edge.fractal_dimension + delta));
                     }
@@ -1251,8 +1385,6 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         const correlation = self.prng.random().float(f64) * 0.5 + 0.5;
         const info = EntanglementInfo.init(correlation, phase_diff);
 
-        try state.addEntanglement(n1_id, n2_id, info);
-
         var key1 = n1_id;
         var key2 = n2_id;
         if (std.mem.order(u8, key1, key2) == .gt) {
@@ -1260,6 +1392,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             key2 = n1_id;
         }
         try log.added_entanglements.append(NodePairKey{ .node1 = key1, .node2 = key2 });
+        try state.addEntanglement(n1_id, n2_id, info);
     }
 
     fn toggleRandomEdge(self: *Self, state: *OptimizationState, log: *UndoLog) !void {
@@ -1282,6 +1415,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         if (node_ids.items.len < 2) {
             new_graph.deinit();
             self.allocator.destroy(new_graph);
+            graph_assigned = true;
             return;
         }
 
@@ -1297,22 +1431,29 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         const n2 = node_ids.items[idx2];
 
         var exists = false;
+        var existing_source = n1;
+        var existing_target = n2;
         var edge_iter = new_graph.edges.iterator();
         while (edge_iter.next()) |entry| {
             if ((std.mem.eql(u8, entry.key_ptr.source, n1) and std.mem.eql(u8, entry.key_ptr.target, n2)) or
                 (std.mem.eql(u8, entry.key_ptr.source, n2) and std.mem.eql(u8, entry.key_ptr.target, n1)))
             {
                 exists = true;
+                existing_source = entry.key_ptr.source;
+                existing_target = entry.key_ptr.target;
                 break;
             }
         }
 
         if (exists) {
-            try new_graph.removeEdge(n1, n2);
+            try new_graph.removeEdge(existing_source, existing_target);
         } else {
             const weight = self.prng.random().float(f64);
-            const edge = Edge.init(self.allocator, n1, n2, .coherent, weight, Complex(f64).init(0.0, 0.0), 1.5);
+            var edge = Edge.init(self.allocator, n1, n2, .coherent, weight, Complex(f64).init(0.0, 0.0), 1.5);
+            var edge_added = false;
+            errdefer if (!edge_added) edge.deinit();
             try new_graph.addEdge(n1, n2, edge);
+            edge_added = true;
         }
 
         log.old_graph = old_graph;
@@ -1339,11 +1480,14 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         for (log.edge_weights.items) |saved| {
             var edge_iter = graph.edges.iterator();
             while (edge_iter.next()) |entry| {
-                if (std.mem.eql(u8, entry.key_ptr.source, saved.source) and std.mem.eql(u8, entry.key_ptr.target, saved.target)) {
-                    for (entry.value_ptr.items) |*edge| {
-                        edge.weight = saved.weight;
-                        edge.fractal_dimension = saved.fractal_dimension;
+                const direct_match = std.mem.eql(u8, entry.key_ptr.source, saved.source) and std.mem.eql(u8, entry.key_ptr.target, saved.target);
+                const reverse_match = std.mem.eql(u8, entry.key_ptr.source, saved.target) and std.mem.eql(u8, entry.key_ptr.target, saved.source);
+                if (direct_match or reverse_match) {
+                    if (saved.index < entry.value_ptr.items.len) {
+                        entry.value_ptr.items[saved.index].weight = saved.weight;
+                        entry.value_ptr.items[saved.index].fractal_dimension = saved.fractal_dimension;
                     }
+                    break;
                 }
             }
         }
@@ -1369,7 +1513,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
         var accepted = false;
         if (delta_energy < 0.0) {
             accepted = true;
-        } else if (self.temperature > 1e-12) {
+        } else if (self.temperature > 1e-12 and std.math.isFinite(delta_energy)) {
             const acceptance_probability = @exp(-delta_energy / self.temperature);
             const random_value = self.prng.random().float(f64);
             if (random_value < acceptance_probability) {
@@ -1412,6 +1556,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             rate = self.cooling_rate * 1.02;
         }
         if (rate > 0.999) rate = 0.999;
+        if (rate >= 1.0) rate = 0.999;
         if (rate < 0.001) rate = 0.001;
 
         if (self.temperature > self.min_temperature) {
@@ -1453,9 +1598,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             while (edge_iter.next()) |edge_entry| {
                 const src_match = std.mem.eql(u8, edge_entry.key_ptr.source, entry.key_ptr.*);
                 const tgt_match = std.mem.eql(u8, edge_entry.key_ptr.target, entry.key_ptr.*);
-                if (src_match and tgt_match) {
-                    degree += edge_entry.value_ptr.items.len;
-                } else if (src_match or tgt_match) {
+                if (src_match or tgt_match) {
                     degree += edge_entry.value_ptr.items.len;
                 }
             }
@@ -1491,8 +1634,11 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             sum_sin += @sin(entry.value_ptr.phase);
             sum_cos += @cos(entry.value_ptr.phase);
         }
-        var avg_phase = std.math.atan2(sum_sin, sum_cos);
-        if (avg_phase < 0.0) avg_phase += 2.0 * std.math.pi;
+        var avg_phase: f64 = 0.0;
+        if (node_count > 0 and (@abs(sum_sin) > 1e-12 or @abs(sum_cos) > 1e-12)) {
+            avg_phase = std.math.atan2(sum_sin, sum_cos);
+            if (avg_phase < 0.0) avg_phase += 2.0 * std.math.pi;
+        }
 
         var match_count: usize = 0;
         node_iter = graph.nodes.iterator();
@@ -1502,7 +1648,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             if (diff < 0.1) match_count += 1;
         }
 
-        if (match_count >= node_count / 2 and node_count >= 2) {
+        if (match_count * 2 > node_count and node_count >= 2) {
             try transforms.append(SymmetryTransform.initWithParams(.rotation_180, [4]f64{ cx, cy, 1.0, 0.0 }));
         }
 
@@ -1519,9 +1665,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             const decay_factor = info.getDecayFactor(self.entanglement_decay_half_life);
             info.correlation_strength *= decay_factor;
 
-            var new_phase = @mod(info.phase_difference + self.temperature * 0.01, 2.0 * std.math.pi);
-            if (new_phase < 0.0) new_phase += 2.0 * std.math.pi;
-            info.phase_difference = new_phase;
+            info.phase_difference = normalizeAngle(info.phase_difference + self.temperature * 0.01);
             info.last_update_time = nowNs();
 
             if (info.correlation_strength < 0.01) {
@@ -1555,9 +1699,7 @@ pub const EntangledStochasticSymmetryOptimizer = struct {
             if (entanglement_count > 0) {
                 const avg_entanglement = entanglement_sum / @as(f64, @floatFromInt(entanglement_count));
                 const phase_adjustment = avg_entanglement * 0.1;
-                var new_phase = @mod(entry.value_ptr.phase + phase_adjustment, 2.0 * std.math.pi);
-                if (new_phase < 0.0) new_phase += 2.0 * std.math.pi;
-                entry.value_ptr.phase = new_phase;
+                entry.value_ptr.phase = normalizeAngle(entry.value_ptr.phase + phase_adjustment);
             }
         }
         state.refreshEntanglementPercentage();
@@ -1635,7 +1777,7 @@ pub fn defaultGraphObjective(state: *const OptimizationState) f64 {
     var node_iter = graph.nodes.iterator();
     while (node_iter.next()) |entry| {
         const node = entry.value_ptr;
-        total_energy += @cos(node.phase);
+        total_energy += (1.0 - @cos(node.phase)) / 2.0;
         total_energy += std.math.sqrt(node.qubit.a.re * node.qubit.a.re + node.qubit.a.im * node.qubit.a.im);
         total_energy += std.math.sqrt(node.qubit.b.re * node.qubit.b.re + node.qubit.b.im * node.qubit.b.im);
     }
@@ -1652,9 +1794,10 @@ pub fn connectivityObjective(state: *const OptimizationState) f64 {
 
     if (node_count == 0) return 0.0;
 
-    const max_edges = if (node_count >= 2) node_count * (node_count - 1) / 2 else 0;
-    const connectivity_ratio = if (max_edges > 0)
-        @as(f64, @floatFromInt(edge_count)) / @as(f64, @floatFromInt(max_edges))
+    const node_count_f = @as(f64, @floatFromInt(node_count));
+    const max_edges_f = if (node_count >= 2) node_count_f * (node_count_f - 1.0) / 2.0 else 0.0;
+    const connectivity_ratio = if (max_edges_f > 0.0)
+        @as(f64, @floatFromInt(edge_count)) / max_edges_f
     else
         0.0;
     const clamped_ratio = if (connectivity_ratio > 1.0) 1.0 else connectivity_ratio;
@@ -1682,8 +1825,9 @@ pub fn quantumCoherenceObjective(state: *const OptimizationState) f64 {
         const node = entry.value_ptr;
         const mag_a = std.math.sqrt(node.qubit.a.re * node.qubit.a.re + node.qubit.a.im * node.qubit.a.im);
         const mag_b = std.math.sqrt(node.qubit.b.re * node.qubit.b.re + node.qubit.b.im * node.qubit.b.im);
-        total_coherence += (mag_a + mag_b) / 2.0;
-        total_coherence += (@cos(node.phase) + 1.0) / 2.0;
+        const magnitude_coherence = (mag_a + mag_b) / 2.0;
+        const phase_coherence = (@cos(node.phase) + 1.0) / 2.0;
+        total_coherence += (magnitude_coherence + phase_coherence) / 2.0;
         node_count += 1;
     }
 
@@ -1698,7 +1842,7 @@ pub fn quantumCoherenceObjective(state: *const OptimizationState) f64 {
         }
     }
 
-    const avg_coherence = if (node_count > 0) total_coherence / (@as(f64, @floatFromInt(node_count)) * 2.0) else 0.0;
+    const avg_coherence = if (node_count > 0) total_coherence / @as(f64, @floatFromInt(node_count)) else 0.0;
     const avg_correlation = if (edge_count > 0) total_correlation / @as(f64, @floatFromInt(edge_count)) else 0.0;
 
     const obj = 1.0 - (avg_coherence + avg_correlation) / 2.0;
