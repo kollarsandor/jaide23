@@ -48,6 +48,24 @@ fn freeMapStringBytes(map: *StringHashMap([]u8), allocator: Allocator) void {
     map.deinit();
 }
 
+fn deinitNodeMap(map: *StringHashMap(Node), allocator: Allocator) void {
+    var it = map.iterator();
+    while (it.next()) |e| {
+        allocator.free(e.key_ptr.*);
+        e.value_ptr.deinit();
+    }
+    map.deinit();
+}
+
+fn clearNodeMapRetainingCapacity(map: *StringHashMap(Node), allocator: Allocator) void {
+    var it = map.iterator();
+    while (it.next()) |e| {
+        allocator.free(e.key_ptr.*);
+        e.value_ptr.deinit();
+    }
+    map.clearRetainingCapacity();
+}
+
 fn putOwnedStringBytes(map: *StringHashMap([]u8), allocator: Allocator, key: []const u8, value: []const u8) !void {
     if (map.fetchRemove(key)) |removed| {
         allocator.free(removed.key);
@@ -89,7 +107,7 @@ pub const Qubit = struct {
 
     pub fn normalizeInPlace(self: *Qubit) void {
         const ns = self.normSquared();
-        if (!(ns > 0.0) or std.math.isInf(ns)) {
+        if (std.math.isNan(ns) or !(ns > 0.0) or std.math.isInf(ns)) {
             self.* = Qubit.initBasis0();
             return;
         }
@@ -100,11 +118,15 @@ pub const Qubit = struct {
     }
 
     pub fn prob0(self: Qubit) f64 {
-        return std.math.clamp(self.a.re * self.a.re + self.a.im * self.a.im, 0.0, 1.0);
+        var q = self;
+        q.normalizeInPlace();
+        return std.math.clamp(q.a.re * q.a.re + q.a.im * q.a.im, 0.0, 1.0);
     }
 
     pub fn prob1(self: Qubit) f64 {
-        return std.math.clamp(self.b.re * self.b.re + self.b.im * self.b.im, 0.0, 1.0);
+        var q = self;
+        q.normalizeInPlace();
+        return std.math.clamp(q.b.re * q.b.re + q.b.im * q.b.im, 0.0, 1.0);
     }
 };
 
@@ -120,6 +142,7 @@ pub const Node = struct {
         const dup_id = try dupeBytes(allocator, id);
         errdefer allocator.free(dup_id);
         const dup_data = try dupeBytes(allocator, data);
+        errdefer allocator.free(dup_data);
         return Node{
             .id = dup_id,
             .data = dup_data,
@@ -315,6 +338,22 @@ pub const TwoQubit = struct {
             },
         };
     }
+
+    pub fn normalizeInPlace(self: *TwoQubit) void {
+        var ns: f64 = 0.0;
+        for (self.amps) |amp| {
+            ns += amp.re * amp.re + amp.im * amp.im;
+        }
+        if (std.math.isNan(ns) or !(ns > 0.0) or std.math.isInf(ns)) {
+            self.* = TwoQubit.initBellPhiPlus();
+            return;
+        }
+        const inv = 1.0 / std.math.sqrt(ns);
+        const s = Complex(f64).init(inv, 0.0);
+        for (&self.amps) |*amp| {
+            amp.* = amp.mul(s);
+        }
+    }
 };
 
 pub const Gate = *const fn (q: Qubit) Qubit;
@@ -358,7 +397,8 @@ pub fn phaseGate(comptime phase: f64) Gate {
 }
 
 fn floatBits(v: f64) u64 {
-    return @as(u64, @bitCast(v));
+    const canonical = if (v == 0.0) 0.0 else v;
+    return @as(u64, @bitCast(canonical));
 }
 
 const EdgeMap = std.HashMap(EdgeKey, ArrayList(Edge), EdgeKeyContext, std.hash_map.default_max_load_percentage);
@@ -402,9 +442,7 @@ pub const SelfSimilarRelationalGraph = struct {
     }
 
     pub fn deinit(self: *SelfSimilarRelationalGraph) void {
-        var n_it = self.nodes.iterator();
-        while (n_it.next()) |e| e.value_ptr.deinit();
-        self.nodes.deinit();
+        deinitNodeMap(&self.nodes, self.allocator);
 
         var ed_it = self.edges.iterator();
         while (ed_it.next()) |e| {
@@ -425,91 +463,56 @@ pub const SelfSimilarRelationalGraph = struct {
         return null;
     }
 
+    fn getCanonicalEdgeKey(self: *SelfSimilarRelationalGraph, source: []const u8, target: []const u8) ?EdgeKey {
+        const s = self.canonicalIdPtr(source) orelse return null;
+        const t = self.canonicalIdPtr(target) orelse return null;
+        return EdgeKey{ .source = s, .target = t };
+    }
+
+    fn syncQuantumRegisterValue(self: *SelfSimilarRelationalGraph, canonical_id: []const u8, q: Qubit) !void {
+        if (self.quantum_register.getPtr(canonical_id)) |qptr| {
+            qptr.* = q;
+        } else {
+            const k = try dupeBytes(self.allocator, canonical_id);
+            errdefer self.allocator.free(k);
+            try self.quantum_register.put(k, q);
+        }
+    }
+
     pub fn addNode(self: *SelfSimilarRelationalGraph, node_in: Node) !void {
         var node = node_in;
         const lookup_id = node.id;
 
         if (self.nodes.getPtr(lookup_id)) |existing| {
-            const new_data = try dupeBytes(self.allocator, node.data);
-
-            var new_metadata = StringHashMap([]u8).init(self.allocator);
-
-            var meta_it = node.metadata.iterator();
-            while (meta_it.next()) |m| {
-                const k = dupeBytes(self.allocator, m.key_ptr.*) catch |err| {
-                    freeMapStringBytes(&new_metadata, self.allocator);
-                    self.allocator.free(new_data);
-                    return err;
-                };
-                const v = dupeBytes(self.allocator, m.value_ptr.*) catch |err| {
-                    self.allocator.free(k);
-                    freeMapStringBytes(&new_metadata, self.allocator);
-                    self.allocator.free(new_data);
-                    return err;
-                };
-                new_metadata.put(k, v) catch |err| {
-                    self.allocator.free(k);
-                    self.allocator.free(v);
-                    freeMapStringBytes(&new_metadata, self.allocator);
-                    self.allocator.free(new_data);
-                    return err;
-                };
-            }
-
-            const canonical_id = existing.id;
-            if (self.quantum_register.fetchRemove(canonical_id)) |removed| {
-                self.allocator.free(removed.key);
-            }
-            const qr_key = dupeBytes(self.allocator, canonical_id) catch |err| {
-                freeMapStringBytes(&new_metadata, self.allocator);
-                self.allocator.free(new_data);
-                return err;
-            };
-
-            self.quantum_register.put(qr_key, node.qubit) catch |err| {
-                self.allocator.free(qr_key);
-                freeMapStringBytes(&new_metadata, self.allocator);
-                self.allocator.free(new_data);
-                return err;
-            };
-
             self.allocator.free(existing.data);
-            existing.data = new_data;
+            existing.data = node.data;
+            node.data = &[_]u8{};
             existing.qubit = node.qubit;
             existing.phase = node.phase;
             freeMapStringBytes(&existing.metadata, self.allocator);
-            existing.metadata = new_metadata;
+            existing.metadata = node.metadata;
+            node.metadata = StringHashMap([]u8).init(self.allocator);
+
+            try self.syncQuantumRegisterValue(existing.id, node.qubit);
 
             node.deinit();
         } else {
-            self.nodes.put(node.id, node) catch |err| {
-                node.deinit();
+            const map_key = try dupeBytes(self.allocator, node.id);
+            errdefer self.allocator.free(map_key);
+
+            self.nodes.put(map_key, node) catch |err| {
                 return err;
             };
 
             const entry = self.nodes.getPtr(lookup_id).?;
-            const canonical_id = entry.id;
-
-            if (self.quantum_register.fetchRemove(canonical_id)) |removed| {
-                self.allocator.free(removed.key);
+            errdefer {
+                if (self.nodes.fetchRemove(entry.id)) |removed| {
+                    self.allocator.free(removed.key);
+                    var v = removed.value;
+                    v.deinit();
+                }
             }
-
-            const qr_key = dupeBytes(self.allocator, canonical_id) catch |err| {
-                if (self.nodes.fetchRemove(canonical_id)) |removed| {
-                    var v = removed.value;
-                    v.deinit();
-                }
-                return err;
-            };
-
-            self.quantum_register.put(qr_key, entry.qubit) catch |err| {
-                self.allocator.free(qr_key);
-                if (self.nodes.fetchRemove(canonical_id)) |removed| {
-                    var v = removed.value;
-                    v.deinit();
-                }
-                return err;
-            };
+            try self.syncQuantumRegisterValue(entry.id, entry.qubit);
         }
 
         try self.updateTopologyHash();
@@ -546,25 +549,23 @@ pub const SelfSimilarRelationalGraph = struct {
     }
 
     pub fn removeEdge(self: *SelfSimilarRelationalGraph, source: []const u8, target: []const u8) !void {
-        const s = self.canonicalIdPtr(source) orelse return error.SourceNodeNotFound;
-        const t = self.canonicalIdPtr(target) orelse return error.TargetNodeNotFound;
-        const key = EdgeKey{ .source = s, .target = t };
+        const key = self.getCanonicalEdgeKey(source, target) orelse return error.NodeNotFound;
         if (self.edges.fetchRemove(key)) |removed| {
             var lst = removed.value;
             for (lst.items) |*edge| edge.deinit();
             lst.deinit();
+            try self.updateTopologyHash();
         }
-        try self.updateTopologyHash();
     }
 
     pub fn removeEdgeSingle(self: *SelfSimilarRelationalGraph, source: []const u8, target: []const u8) !void {
-        const s = self.canonicalIdPtr(source) orelse return error.SourceNodeNotFound;
-        const t = self.canonicalIdPtr(target) orelse return error.TargetNodeNotFound;
-        const key = EdgeKey{ .source = s, .target = t };
+        const key = self.getCanonicalEdgeKey(source, target) orelse return error.NodeNotFound;
+        var changed = false;
         if (self.edges.getPtr(key)) |lst| {
             if (lst.items.len > 0) {
                 var e = lst.orderedRemove(lst.items.len - 1);
                 e.deinit();
+                changed = true;
             }
             if (lst.items.len == 0) {
                 if (self.edges.fetchRemove(key)) |removed| {
@@ -573,7 +574,7 @@ pub const SelfSimilarRelationalGraph = struct {
                 }
             }
         }
-        try self.updateTopologyHash();
+        if (changed) try self.updateTopologyHash();
     }
 
     pub fn removeNode(self: *SelfSimilarRelationalGraph, node_id: []const u8) !void {
@@ -616,6 +617,7 @@ pub const SelfSimilarRelationalGraph = struct {
         }
 
         if (self.nodes.fetchRemove(canonical)) |removed| {
+            self.allocator.free(removed.key);
             var v = removed.value;
             v.deinit();
         }
@@ -632,21 +634,23 @@ pub const SelfSimilarRelationalGraph = struct {
     }
 
     pub fn getEdgesConst(self: *const SelfSimilarRelationalGraph, source: []const u8, target: []const u8) ?[]const Edge {
-        const key = EdgeKey{ .source = source, .target = target };
+        const s_node = self.nodes.getPtr(source) orelse return null;
+        const t_node = self.nodes.getPtr(target) orelse return null;
+        const key = EdgeKey{ .source = s_node.id, .target = t_node.id };
         if (self.edges.getPtr(key)) |list| return list.items;
         return null;
     }
 
     pub fn hasEdge(self: *const SelfSimilarRelationalGraph, source: []const u8, target: []const u8) bool {
-        const key = EdgeKey{ .source = source, .target = target };
+        const s_node = self.nodes.getPtr(source) orelse return false;
+        const t_node = self.nodes.getPtr(target) orelse return false;
+        const key = EdgeKey{ .source = s_node.id, .target = t_node.id };
         if (self.edges.getPtr(key)) |lst| return lst.items.len > 0;
         return false;
     }
 
     pub fn clear(self: *SelfSimilarRelationalGraph) !void {
-        var n_it = self.nodes.iterator();
-        while (n_it.next()) |e| e.value_ptr.deinit();
-        self.nodes.clearRetainingCapacity();
+        clearNodeMapRetainingCapacity(&self.nodes, self.allocator);
 
         var ed_it = self.edges.iterator();
         while (ed_it.next()) |e| {
@@ -665,78 +669,105 @@ pub const SelfSimilarRelationalGraph = struct {
     }
 
     pub fn setQuantumState(self: *SelfSimilarRelationalGraph, node_id: []const u8, q: Qubit) !void {
-        const n = self.nodes.getPtr(node_id) orelse return error.NodeNotFound;
+        const canonical = self.canonicalIdPtr(node_id) orelse return error.NodeNotFound;
+        const n = self.nodes.getPtr(canonical).?;
         n.qubit = q;
-
-        if (self.quantum_register.getPtr(node_id)) |qptr| {
-            qptr.* = q;
-        } else {
-            const k = try dupeBytes(self.allocator, node_id);
-            errdefer self.allocator.free(k);
-            try self.quantum_register.put(k, q);
-        }
-
+        try self.syncQuantumRegisterValue(canonical, q);
         try self.updateTopologyHash();
     }
 
     pub fn getQuantumState(self: *const SelfSimilarRelationalGraph, node_id: []const u8) ?Qubit {
-        return self.quantum_register.get(node_id);
+        const n = self.nodes.getPtr(node_id) orelse return null;
+        return self.quantum_register.get(n.id);
     }
 
     pub fn applyQuantumGate(self: *SelfSimilarRelationalGraph, node_id: []const u8, gate: Gate) !void {
-        const n = self.nodes.getPtr(node_id) orelse return error.NodeNotFound;
+        const canonical = self.canonicalIdPtr(node_id) orelse return error.NodeNotFound;
+        const n = self.nodes.getPtr(canonical).?;
         n.qubit = gate(n.qubit);
-        if (self.quantum_register.getPtr(node_id)) |qptr| {
-            qptr.* = n.qubit;
-        } else {
-            const k = try dupeBytes(self.allocator, node_id);
-            errdefer self.allocator.free(k);
-            try self.quantum_register.put(k, n.qubit);
-        }
+        try self.syncQuantumRegisterValue(canonical, n.qubit);
         try self.updateTopologyHash();
+    }
+
+    fn pairKeyFor(a: []const u8, b: []const u8) PairKey {
+        return if (std.mem.lessThan(u8, a, b)) PairKey{ .a = a, .b = b } else PairKey{ .a = b, .b = a };
     }
 
     pub fn entangleNodes(self: *SelfSimilarRelationalGraph, a_id: []const u8, b_id: []const u8) !void {
         const a = self.canonicalIdPtr(a_id) orelse return error.NodeNotFound;
         const b = self.canonicalIdPtr(b_id) orelse return error.NodeNotFound;
+        const pk = pairKeyFor(a, b);
 
-        const pk = if (std.mem.lessThan(u8, a, b)) PairKey{ .a = a, .b = b } else PairKey{ .a = b, .b = a };
         try self.entanglements.put(pk, TwoQubit.initBellPhiPlus());
 
-        const edge_ab = Edge.init(self.allocator, a, b, .entangled, 1.0, Complex(f64).init(1.0, 0.0), 0.0);
-        self.addEdge(a, b, edge_ab) catch |err| {
-            _ = self.entanglements.remove(pk);
-            return err;
-        };
+        var changed = false;
 
-        const edge_ba = Edge.init(self.allocator, b, a, .entangled, 1.0, Complex(f64).init(1.0, 0.0), 0.0);
-        self.addEdge(b, a, edge_ba) catch |err| {
-            _ = self.entanglements.remove(pk);
-            const key_ab = EdgeKey{ .source = a, .target = b };
-            if (self.edges.getPtr(key_ab)) |lst| {
-                var i: usize = lst.items.len;
-                while (i > 0) {
-                    i -= 1;
-                    if (lst.items[i].quality == .entangled) {
-                        var e = lst.orderedRemove(i);
-                        e.deinit();
-                        break;
-                    }
+        const key_ab = EdgeKey{ .source = a, .target = b };
+        const key_ba = EdgeKey{ .source = b, .target = a };
+
+        if (!self.hasEntangledEdge(a, b)) {
+            const edge_ab = Edge.init(self.allocator, a, b, .entangled, 1.0, Complex(f64).init(1.0, 0.0), 0.0);
+            try self.addEdge(a, b, edge_ab);
+            changed = true;
+        }
+
+        if (!self.hasEntangledEdge(b, a)) {
+            const edge_ba = Edge.init(self.allocator, b, a, .entangled, 1.0, Complex(f64).init(1.0, 0.0), 0.0);
+            self.addEdge(b, a, edge_ba) catch |err| {
+                if (changed) {
+                    self.removeMatchingEdgeNoHash(key_ab, .entangled);
+                    _ = self.edges.getPtr(key_ba);
+                    _ = self.entanglements.remove(pk);
+                    self.updateTopologyHash() catch {};
+                }
+                return err;
+            };
+            changed = true;
+        }
+
+        if (!changed) {
+            try self.updateTopologyHash();
+        }
+    }
+
+    fn hasEntangledEdge(self: *const SelfSimilarRelationalGraph, source: []const u8, target: []const u8) bool {
+        const key = EdgeKey{ .source = source, .target = target };
+        if (self.edges.getPtr(key)) |lst| {
+            for (lst.items) |edge| {
+                if (edge.quality == .entangled) return true;
+            }
+        }
+        return false;
+    }
+
+    fn removeMatchingEdgeNoHash(self: *SelfSimilarRelationalGraph, key: EdgeKey, quality: EdgeQuality) void {
+        if (self.edges.getPtr(key)) |lst| {
+            var i: usize = 0;
+            while (i < lst.items.len) : (i += 1) {
+                if (lst.items[i].quality == quality) {
+                    var e = lst.orderedRemove(i);
+                    e.deinit();
+                    break;
                 }
             }
-            return err;
-        };
+            if (lst.items.len == 0) {
+                if (self.edges.fetchRemove(key)) |removed| {
+                    var l = removed.value;
+                    l.deinit();
+                }
+            }
+        }
     }
 
     pub fn measure(self: *SelfSimilarRelationalGraph, node_id: []const u8) !u1 {
-        _ = self.canonicalIdPtr(node_id) orelse return error.NodeNotFound;
+        const canonical = self.canonicalIdPtr(node_id) orelse return error.NodeNotFound;
 
         var hit_key: ?PairKey = null;
         var hit_val: ?TwoQubit = null;
 
         var it = self.entanglements.iterator();
         while (it.next()) |e| {
-            if (std.mem.eql(u8, e.key_ptr.*.a, node_id) or std.mem.eql(u8, e.key_ptr.*.b, node_id)) {
+            if (std.mem.eql(u8, e.key_ptr.*.a, canonical) or std.mem.eql(u8, e.key_ptr.*.b, canonical)) {
                 hit_key = e.key_ptr.*;
                 hit_val = e.value_ptr.*;
                 break;
@@ -744,7 +775,9 @@ pub const SelfSimilarRelationalGraph = struct {
         }
 
         if (hit_key) |pk| {
-            const state = hit_val.?;
+            var state = hit_val.?;
+            state.normalizeInPlace();
+
             const r = self.rng.random().float(f64);
             var cum: f64 = 0.0;
             var outcome: usize = state.amps.len - 1;
@@ -752,7 +785,7 @@ pub const SelfSimilarRelationalGraph = struct {
             while (amp_idx < state.amps.len) : (amp_idx += 1) {
                 const amp = state.amps[amp_idx];
                 cum += amp.re * amp.re + amp.im * amp.im;
-                if (r <= cum) {
+                if (r <= cum or amp_idx + 1 == state.amps.len) {
                     outcome = amp_idx;
                     break;
                 }
@@ -783,24 +816,24 @@ pub const SelfSimilarRelationalGraph = struct {
                 },
             }
 
-            if (self.quantum_register.getPtr(a_id)) |qa| qa.* = a_ptr.qubit;
-            if (self.quantum_register.getPtr(b_id)) |qb| qb.* = b_ptr.qubit;
+            try self.syncQuantumRegisterValue(a_id, a_ptr.qubit);
+            try self.syncQuantumRegisterValue(b_id, b_ptr.qubit);
 
             _ = self.entanglements.remove(pk);
 
-            const bit: u1 = if (std.mem.eql(u8, node_id, a_id))
+            const bit: u1 = if (std.mem.eql(u8, canonical, a_id))
                 @as(u1, @intCast((outcome >> 1) & 1))
             else
                 @as(u1, @intCast(outcome & 1));
 
             if (self.edges.getPtr(EdgeKey{ .source = a_id, .target = b_id })) |lst| {
-                if (lst.items.len > 0) {
-                    lst.items[0].quality = .collapsed;
+                for (lst.items) |*edge| {
+                    if (edge.quality == .entangled) edge.quality = .collapsed;
                 }
             }
             if (self.edges.getPtr(EdgeKey{ .source = b_id, .target = a_id })) |lst2| {
-                if (lst2.items.len > 0) {
-                    lst2.items[0].quality = .collapsed;
+                for (lst2.items) |*edge| {
+                    if (edge.quality == .entangled) edge.quality = .collapsed;
                 }
             }
 
@@ -808,13 +841,13 @@ pub const SelfSimilarRelationalGraph = struct {
             return bit;
         }
 
-        const n = self.nodes.getPtr(node_id).?;
+        const n = self.nodes.getPtr(canonical).?;
         const p0 = n.qubit.prob0();
         const r0 = self.rng.random().float(f64);
         const bit: u1 = if (r0 <= p0) 0 else 1;
 
         n.qubit = if (bit == 0) Qubit.initBasis0() else Qubit.initBasis1();
-        if (self.quantum_register.getPtr(node_id)) |qp| qp.* = n.qubit;
+        try self.syncQuantumRegisterValue(canonical, n.qubit);
 
         try self.updateTopologyHash();
         return bit;
@@ -840,7 +873,6 @@ pub const SelfSimilarRelationalGraph = struct {
         var it = self.nodes.iterator();
         while (it.next()) |e| {
             const copy = try allocator.dupe(u8, e.value_ptr.id);
-            errdefer allocator.free(copy);
             try out.append(copy);
         }
         std.mem.sort([]u8, out.items, {}, struct {
@@ -866,17 +898,15 @@ pub const SelfSimilarRelationalGraph = struct {
         shaUpdateU64(h, floatBits(v));
     }
 
-    fn xorDigest(acc: *[Sha256.digest_length]u8, d: *const [Sha256.digest_length]u8) void {
-        var i: usize = 0;
-        while (i < Sha256.digest_length) : (i += 1) {
-            acc[i] ^= d[i];
-        }
-    }
-
     fn updateTopologyHash(self: *SelfSimilarRelationalGraph) !void {
-        var acc_nodes: [Sha256.digest_length]u8 = [_]u8{0} ** Sha256.digest_length;
-        var acc_edges: [Sha256.digest_length]u8 = [_]u8{0} ** Sha256.digest_length;
-        var acc_ent: [Sha256.digest_length]u8 = [_]u8{0} ** Sha256.digest_length;
+        var node_digests = ArrayList([Sha256.digest_length]u8).init(self.allocator);
+        defer node_digests.deinit();
+
+        var edge_group_digests = ArrayList([Sha256.digest_length]u8).init(self.allocator);
+        defer edge_group_digests.deinit();
+
+        var ent_digests = ArrayList([Sha256.digest_length]u8).init(self.allocator);
+        defer ent_digests.deinit();
 
         var node_count: u64 = 0;
         var edgekey_count: u64 = 0;
@@ -887,19 +917,24 @@ pub const SelfSimilarRelationalGraph = struct {
         while (n_it.next()) |e| {
             node_count += 1;
 
-            var meta_acc: [Sha256.digest_length]u8 = [_]u8{0} ** Sha256.digest_length;
-            var meta_count: u64 = 0;
+            var meta_digests = ArrayList([Sha256.digest_length]u8).init(self.allocator);
+            defer meta_digests.deinit();
 
             var mit = e.value_ptr.metadata.iterator();
             while (mit.next()) |me| {
-                meta_count += 1;
                 var mh = Sha256.init(.{});
                 shaUpdateBytes(&mh, me.key_ptr.*);
                 shaUpdateBytes(&mh, me.value_ptr.*);
                 var md: [Sha256.digest_length]u8 = undefined;
                 mh.final(&md);
-                xorDigest(&meta_acc, &md);
+                try meta_digests.append(md);
             }
+
+            std.mem.sort([Sha256.digest_length]u8, meta_digests.items, {}, struct {
+                fn lessThan(_: void, lhs: [Sha256.digest_length]u8, rhs: [Sha256.digest_length]u8) bool {
+                    return std.mem.lessThan(u8, &lhs, &rhs);
+                }
+            }.lessThan);
 
             var h = Sha256.init(.{});
             shaUpdateBytes(&h, e.value_ptr.id);
@@ -909,63 +944,87 @@ pub const SelfSimilarRelationalGraph = struct {
             shaUpdateF64(&h, e.value_ptr.qubit.a.im);
             shaUpdateF64(&h, e.value_ptr.qubit.b.re);
             shaUpdateF64(&h, e.value_ptr.qubit.b.im);
-            h.update(&meta_acc);
-            shaUpdateU64(&h, meta_count);
+            shaUpdateU64(&h, @as(u64, @intCast(meta_digests.items.len)));
+            for (meta_digests.items) |md| h.update(&md);
 
             var d: [Sha256.digest_length]u8 = undefined;
             h.final(&d);
-            xorDigest(&acc_nodes, &d);
+            try node_digests.append(d);
         }
+
+        std.mem.sort([Sha256.digest_length]u8, node_digests.items, {}, struct {
+            fn lessThan(_: void, lhs: [Sha256.digest_length]u8, rhs: [Sha256.digest_length]u8) bool {
+                return std.mem.lessThan(u8, &lhs, &rhs);
+            }
+        }.lessThan);
 
         var e_it = self.edges.iterator();
         while (e_it.next()) |kv| {
             edgekey_count += 1;
 
-            var edges_acc: [Sha256.digest_length]u8 = [_]u8{0} ** Sha256.digest_length;
-            var edges_count: u64 = 0;
+            var edge_digests = ArrayList([Sha256.digest_length]u8).init(self.allocator);
+            defer edge_digests.deinit();
 
             for (kv.value_ptr.items) |*edge| {
-                edges_count += 1;
                 total_edge_count += 1;
 
-                var emeta_acc: [Sha256.digest_length]u8 = [_]u8{0} ** Sha256.digest_length;
-                var emeta_count: u64 = 0;
+                var emeta_digests = ArrayList([Sha256.digest_length]u8).init(self.allocator);
+                defer emeta_digests.deinit();
 
                 var emi = edge.metadata.iterator();
                 while (emi.next()) |me| {
-                    emeta_count += 1;
                     var mh = Sha256.init(.{});
                     shaUpdateBytes(&mh, me.key_ptr.*);
                     shaUpdateBytes(&mh, me.value_ptr.*);
                     var md: [Sha256.digest_length]u8 = undefined;
                     mh.final(&md);
-                    xorDigest(&emeta_acc, &md);
+                    try emeta_digests.append(md);
                 }
 
+                std.mem.sort([Sha256.digest_length]u8, emeta_digests.items, {}, struct {
+                    fn lessThan(_: void, lhs: [Sha256.digest_length]u8, rhs: [Sha256.digest_length]u8) bool {
+                        return std.mem.lessThan(u8, &lhs, &rhs);
+                    }
+                }.lessThan);
+
                 var eh = Sha256.init(.{});
+                shaUpdateBytes(&eh, edge.source);
+                shaUpdateBytes(&eh, edge.target);
                 shaUpdateBytes(&eh, edge.quality.toString());
                 shaUpdateF64(&eh, edge.weight);
                 shaUpdateF64(&eh, edge.fractal_dimension);
                 shaUpdateF64(&eh, edge.quantum_correlation.re);
                 shaUpdateF64(&eh, edge.quantum_correlation.im);
-                eh.update(&emeta_acc);
-                shaUpdateU64(&eh, emeta_count);
+                shaUpdateU64(&eh, @as(u64, @intCast(emeta_digests.items.len)));
+                for (emeta_digests.items) |md| eh.update(&md);
 
                 var ed: [Sha256.digest_length]u8 = undefined;
                 eh.final(&ed);
-                xorDigest(&edges_acc, &ed);
+                try edge_digests.append(ed);
             }
+
+            std.mem.sort([Sha256.digest_length]u8, edge_digests.items, {}, struct {
+                fn lessThan(_: void, lhs: [Sha256.digest_length]u8, rhs: [Sha256.digest_length]u8) bool {
+                    return std.mem.lessThan(u8, &lhs, &rhs);
+                }
+            }.lessThan);
 
             var kh = Sha256.init(.{});
             shaUpdateBytes(&kh, kv.key_ptr.source);
             shaUpdateBytes(&kh, kv.key_ptr.target);
-            kh.update(&edges_acc);
-            shaUpdateU64(&kh, edges_count);
+            shaUpdateU64(&kh, @as(u64, @intCast(edge_digests.items.len)));
+            for (edge_digests.items) |ed| kh.update(&ed);
 
             var kd: [Sha256.digest_length]u8 = undefined;
             kh.final(&kd);
-            xorDigest(&acc_edges, &kd);
+            try edge_group_digests.append(kd);
         }
+
+        std.mem.sort([Sha256.digest_length]u8, edge_group_digests.items, {}, struct {
+            fn lessThan(_: void, lhs: [Sha256.digest_length]u8, rhs: [Sha256.digest_length]u8) bool {
+                return std.mem.lessThan(u8, &lhs, &rhs);
+            }
+        }.lessThan);
 
         var en_it = self.entanglements.iterator();
         while (en_it.next()) |kv| {
@@ -981,23 +1040,29 @@ pub const SelfSimilarRelationalGraph = struct {
 
             var d: [Sha256.digest_length]u8 = undefined;
             h.final(&d);
-            xorDigest(&acc_ent, &d);
+            try ent_digests.append(d);
         }
 
+        std.mem.sort([Sha256.digest_length]u8, ent_digests.items, {}, struct {
+            fn lessThan(_: void, lhs: [Sha256.digest_length]u8, rhs: [Sha256.digest_length]u8) bool {
+                return std.mem.lessThan(u8, &lhs, &rhs);
+            }
+        }.lessThan);
+
         var final = Sha256.init(.{});
-        final.update(&acc_nodes);
         shaUpdateU64(&final, node_count);
-        final.update(&acc_edges);
+        for (node_digests.items) |d| final.update(&d);
         shaUpdateU64(&final, edgekey_count);
         shaUpdateU64(&final, total_edge_count);
-        final.update(&acc_ent);
+        for (edge_group_digests.items) |d| final.update(&d);
         shaUpdateU64(&final, ent_count);
+        for (ent_digests.items) |d| final.update(&d);
 
         var digest: [Sha256.digest_length]u8 = undefined;
         final.final(&digest);
 
         var out: [65]u8 = undefined;
-        _ = try std.fmt.bufPrint(&out, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
+        _ = try std.fmt.bufPrint(out[0..64], "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
         out[64] = 0;
         self.topology_hash = out;
     }
@@ -1006,15 +1071,12 @@ pub const SelfSimilarRelationalGraph = struct {
         return self.topology_hash[0..64];
     }
 
-    pub fn encodeInformation(self: *SelfSimilarRelationalGraph, data: []const u8) ![]u8 {
+    pub fn encodeInformation(self: *SelfSimilarRelationalGraph, data: []const u8) ![]const u8 {
         var hash: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(data, &hash, .{});
 
         var id_buf: [16]u8 = undefined;
         _ = try std.fmt.bufPrint(&id_buf, "{s}", .{std.fmt.fmtSliceHexLower(hash[0..8])});
-
-        const node_id = try self.allocator.dupe(u8, id_buf[0..16]);
-        errdefer self.allocator.free(node_id);
 
         var added_node = false;
         var added_edges = ArrayList(EdgeKey).init(self.allocator);
@@ -1029,15 +1091,19 @@ pub const SelfSimilarRelationalGraph = struct {
                 }
             }
             if (added_node) {
-                if (self.nodes.fetchRemove(node_id)) |removed| {
+                if (self.nodes.fetchRemove(id_buf[0..16])) |removed| {
+                    self.allocator.free(removed.key);
                     var v = removed.value;
                     v.deinit();
+                }
+                if (self.quantum_register.fetchRemove(id_buf[0..16])) |removed| {
+                    self.allocator.free(removed.key);
                 }
             }
             self.updateTopologyHash() catch {};
         }
 
-        var node = try Node.init(self.allocator, node_id, data, Qubit.initBasis0(), 0.0);
+        var node = try Node.init(self.allocator, id_buf[0..16], data, Qubit.initBasis0(), 0.0);
 
         const ts_str = std.fmt.allocPrint(self.allocator, "{d}", .{std.time.timestamp()}) catch |err| {
             node.deinit();
@@ -1062,11 +1128,11 @@ pub const SelfSimilarRelationalGraph = struct {
         if (ids.items.len > 1) {
             const max_links: usize = if (ids.items.len - 1 < 3) ids.items.len - 1 else 3;
             var linked: usize = 0;
-            var i: usize = ids.items.len;
-            while (i > 0 and linked < max_links) : (i -= 1) {
-                const prev = ids.items[i - 1];
-                if (std.mem.eql(u8, prev, node_id)) continue;
-                const src = self.canonicalIdPtr(node_id).?;
+            var i: usize = 0;
+            while (i < ids.items.len and linked < max_links) : (i += 1) {
+                const prev = ids.items[i];
+                if (std.mem.eql(u8, prev, id_buf[0..16])) continue;
+                const src = self.canonicalIdPtr(id_buf[0..16]).?;
                 const dst = self.canonicalIdPtr(prev).?;
                 const e = Edge.init(self.allocator, src, dst, .coherent, 0.5, Complex(f64).init(0.0, 0.0), 0.0);
                 try self.addEdge(src, dst, e);
@@ -1075,8 +1141,7 @@ pub const SelfSimilarRelationalGraph = struct {
             }
         }
 
-        try self.updateTopologyHash();
-        return node_id;
+        return self.canonicalIdPtr(id_buf[0..16]).?;
     }
 
     pub fn decodeInformation(self: *const SelfSimilarRelationalGraph, node_id: []const u8) ?[]const u8 {
@@ -1126,6 +1191,8 @@ pub const SelfSimilarRelationalGraph = struct {
             node.qubit.a.im = @floatCast(tensor.data[idx * 4 + 1]);
             node.qubit.b.re = @floatCast(tensor.data[idx * 4 + 2]);
             node.qubit.b.im = @floatCast(tensor.data[idx * 4 + 3]);
+            node.qubit.normalizeInPlace();
+            try self.syncQuantumRegisterValue(node.id, node.qubit);
         }
 
         try self.updateTopologyHash();
@@ -1142,11 +1209,15 @@ pub const SelfSimilarRelationalGraph = struct {
         @memset(tensor.data, 0);
         var i: usize = 0;
         while (i < n) : (i += 1) {
+            const s_node = self.nodes.getPtr(node_ids[i]) orelse continue;
             var j: usize = 0;
             while (j < n) : (j += 1) {
-                const key = EdgeKey{ .source = node_ids[i], .target = node_ids[j] };
+                const t_node = self.nodes.getPtr(node_ids[j]) orelse continue;
+                const key = EdgeKey{ .source = s_node.id, .target = t_node.id };
                 if (self.edges.get(key)) |edge_list| {
-                    tensor.data[i * n + j] = @floatCast(@as(f64, @floatFromInt(edge_list.items.len)));
+                    var total_weight: f64 = 0.0;
+                    for (edge_list.items) |edge| total_weight += edge.weight;
+                    tensor.data[i * n + j] = @floatCast(total_weight);
                 }
             }
         }
