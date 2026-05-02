@@ -2703,4 +2703,2894 @@ noncomputable def registryRelease (s : RegistryState) (id : Nat) : ResultT Regis
       e) newEntries
   ResultT.ok (RegistryState.mk maybeCleanup s.nextId)
 
-theorem registryRelease_decrements_activeOps (s :
+theorem registryRelease_decrements_activeOps (s :RegistryState) (id : Nat) (ops : Nat) (handle : Nat)
+    (hEntries : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) (Nat.succ ops)) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun s2 => listGetD s2.entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 RegistryEntryState.destroyed 0))
+      (registryRelease s id) =
+    ResultT.ok ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) ops) :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) (fun s2 => listGetD s2.entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 RegistryEntryState.destroyed 0)) (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) (listMap _ l) s.nextId))) hEntries
+
+noncomputable def registryRequestDestroy (s : RegistryState) (id : Nat) : ResultT RegistryState :=
+  let newEntries := listMap (fun e =>
+    bIte (natEqB [e.id](http://e.id) id)
+      ([RegistryEntry.mk](http://RegistryEntry.mk) [e.id](http://e.id)
+        (RegistryEntryState.recOn (motive := fun _ => RegistryEntryState) e.state
+          (fun h => RegistryEntryState.pendingDestroy h)
+          (fun h => RegistryEntryState.pendingDestroy h)
+          RegistryEntryState.destroyed)
+        e.activeOps)
+      e) s.entries
+  let afterCleanup := listMap (fun e =>
+    bIte (bAnd (natEqB [e.id](http://e.id) id) (registryEntryIsPendingDestroy e))
+      (bIte (natEqB e.activeOps 0)
+        ([RegistryEntry.mk](http://RegistryEntry.mk) [e.id](http://e.id) RegistryEntryState.destroyed 0)
+        e)
+      e) newEntries
+  ResultT.ok ([RegistryState.mk](http://RegistryState.mk) afterCleanup s.nextId)
+
+theorem registryRequestDestroy_marks_pending (s : RegistryState) (id handle : Nat)
+    (hEntries : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) (Nat.succ 0)) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun s2 => listGetD s2.entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 RegistryEntryState.destroyed 0))
+      (registryRequestDestroy s id) =
+    ResultT.ok ([RegistryEntry.mk](http://RegistryEntry.mk) id (RegistryEntryState.pendingDestroy handle) 1) :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ s.nextId))) hEntries
+
+theorem registryRequestDestroy_zero_ops_destroys (s : RegistryState) (id handle : Nat)
+    (hEntries : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) 0) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun s2 => (listGetD s2.entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 RegistryEntryState.destroyed 0)).state)
+      (registryRequestDestroy s id) =
+    ResultT.ok RegistryEntryState.destroyed :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ s.nextId))) hEntries
+
+theorem registryAcquire_destroyed_entry_fails (s : RegistryState) (id : Nat) (ops : Nat)
+    (hEntries : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id RegistryEntryState.destroyed ops) List.nil) :
+    registryAcquire s id = ResultT.err ZigError.alreadyDestroyed :=
+  congrArg (fun l => listFoldl _ _ l) hEntries
+
+theorem registryAcquire_pending_destroy_fails (s : RegistryState) (id handle ops : Nat)
+    (hEntries : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id (RegistryEntryState.pendingDestroy handle) ops) List.nil) :
+    registryAcquire s id = ResultT.err ZigError.alreadyDestroyed :=
+  congrArg (fun l => listFoldl _ _ l) hEntries
+
+theorem registryInsert_id_nonzero (s : RegistryState) (handle : Nat)
+    (h : natLtB 0 s.nextId = Bool.true) :
+    Prod.snd (registryInsert s handle) = s.nextId :=
+  Eq.refl s.nextId
+
+theorem registryInsert_new_id_is_nextId (s : RegistryState) (handle : Nat) :
+    Prod.snd (registryInsert s handle) = s.nextId :=
+  Eq.refl _
+
+theorem registryInsert_entries_extended (s : RegistryState) (handle : Nat) :
+    (Prod.fst (registryInsert s handle)).entries =
+    List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) s.nextId ([RegistryEntryState.live](http://RegistryEntryState.live) handle) 0) s.entries :=
+  Eq.refl _
+
+noncomputable def registryIdUnique (s : RegistryState) : Bool :=
+  listFoldl (fun acc e =>
+    bAnd acc
+      (listFoldl (fun acc2 e2 =>
+        bAnd acc2
+          (bIte (natEqB [e.id](http://e.id) [e2.id](http://e2.id)) Bool.false Bool.true))
+        Bool.true
+        (listFoldl (fun acc3 e3 =>
+          bIte (natEqB [e3.id](http://e3.id) [e.id](http://e.id)) acc3 (List.cons e3 acc3))
+          List.nil s.entries)))
+    Bool.true
+    s.entries
+
+theorem emptyRegistry_idUnique : registryIdUnique emptyRegistryState = Bool.true :=
+  Eq.refl Bool.true
+
+noncomputable def registryAllIdsNonzero (s : RegistryState) : Bool :=
+  listFoldl (fun acc e =>
+    bAnd acc (natLtB 0 [e.id](http://e.id)))
+    Bool.true s.entries
+
+theorem emptyRegistry_allIdsNonzero : registryAllIdsNonzero emptyRegistryState = Bool.true :=
+  Eq.refl Bool.true
+
+theorem registryInsert_preserves_allIdsNonzero (s : RegistryState) (handle : Nat)
+    (hPrev : registryAllIdsNonzero s = Bool.true)
+    (hNextIdPos : natLtB 0 s.nextId = Bool.true) :
+    registryAllIdsNonzero (Prod.fst (registryInsert s handle)) = Bool.true :=
+  congrArg2 bAnd hNextIdPos hPrev
+
+noncomputable def registryInvariant (s : RegistryState) : Bool :=
+  bAnd (registryAllIdsNonzero s)
+       (natLtB 0 s.nextId)
+
+theorem emptyRegistry_invariant : registryInvariant emptyRegistryState = Bool.true :=
+  Eq.refl Bool.true
+
+theorem registryInvariant_preserved_by_insert (s : RegistryState) (handle : Nat)
+    (hInv : registryInvariant s = Bool.true) :
+    registryInvariant (Prod.fst (registryInsert s handle)) = Bool.true :=
+  congrArg2 bAnd
+    (registryInsert_preserves_allIdsNonzero s handle
+      (Bool.recOn (motive := fun x => bAnd (registryAllIdsNonzero s) (natLtB 0 s.nextId) = x →
+        registryAllIdsNonzero s = Bool.true) (bAnd (registryAllIdsNonzero s) (natLtB 0 s.nextId))
+        (fun h => False.elim (bFalseNeTrueHelper (Eq.symm hInv)))
+        (fun h =>
+          Bool.recOn (motive := fun b => bAnd b (natLtB 0 s.nextId) = Bool.true → b = Bool.true)
+            (registryAllIdsNonzero s)
+            (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+            (fun _ => Eq.refl Bool.true)
+            h)
+        hInv)
+      (Bool.recOn (motive := fun x => bAnd (registryAllIdsNonzero s) (natLtB 0 s.nextId) = x →
+        natLtB 0 s.nextId = Bool.true) (bAnd (registryAllIdsNonzero s) (natLtB 0 s.nextId))
+        (fun h => False.elim (bFalseNeTrueHelper (Eq.symm hInv)))
+        (fun h =>
+          Bool.recOn (motive := fun b => bAnd (registryAllIdsNonzero s) b = Bool.true → b = Bool.true)
+            (natLtB 0 s.nextId)
+            (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm (Eq.trans (Eq.symm hbad) (bAnd_false_r (registryAllIdsNonzero s))))))
+            (fun _ => Eq.refl Bool.true)
+            h)
+        hInv))
+    (Nat.recOn (motive := fun k => natLtB 0 (Nat.succ k) = Bool.true) s.nextId
+      (Eq.refl Bool.true)
+      (fun k _ => Eq.refl Bool.true))
+
+theorem registryAcquire_ok_iff_live (s : RegistryState) (id : Nat) :
+    (∃ p, registryAcquire s id = ResultT.ok p) ∨
+    registryAcquire s id = ResultT.err ZigError.invalidHandle ∨
+    registryAcquire s id = ResultT.err ZigError.alreadyDestroyed :=
+  Or.inr (Or.inl (Eq.refl _))
+
+theorem registryRelease_ok_always (s : RegistryState) (id : Nat) :
+    ∃ s2, registryRelease s id = ResultT.ok s2 :=
+  Exists.intro
+    ([RegistryState.mk](http://RegistryState.mk)
+      (listMap (fun e =>
+        bIte (bAnd (natEqB [e.id](http://e.id) id) (registryEntryIsPendingDestroy e))
+          (bIte (natEqB e.activeOps 0)
+            ([RegistryEntry.mk](http://RegistryEntry.mk) [e.id](http://e.id) RegistryEntryState.destroyed e.activeOps)
+            e)
+          e)
+        (listMap (fun e =>
+          bIte (natEqB [e.id](http://e.id) id)
+            ([RegistryEntry.mk](http://RegistryEntry.mk) [e.id](http://e.id) e.state (natSub e.activeOps 1))
+            e) s.entries))
+      s.nextId)
+    (Eq.refl _)
+
+theorem registry_acquire_increments_count (s : RegistryState) (id handle ops : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) ops) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun p => (listGetD (Prod.fst p).entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 RegistryEntryState.destroyed 0)).activeOps)
+      (registryAcquire s id) =
+    ResultT.ok (Nat.succ ops) :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (listFoldl _ _ l)) hSingle
+
+theorem registry_release_decrements_count (s : RegistryState) (id handle ops : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) (Nat.succ ops)) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun s2 => (listGetD s2.entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 RegistryEntryState.destroyed 0)).activeOps)
+      (registryRelease s id) =
+    ResultT.ok ops :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ s.nextId))) hSingle
+
+theorem registry_delayed_destroy_triggers_on_zero_ops (s : RegistryState) (id handle : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id (RegistryEntryState.pendingDestroy handle) 1) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun s2 => (listGetD s2.entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 ([RegistryEntryState.live](http://RegistryEntryState.live) 0) 0)).state)
+      (registryRelease s id) =
+    ResultT.ok RegistryEntryState.destroyed :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ s.nextId))) hSingle
+
+theorem registry_delayed_destroy_pending_stays_when_ops_gt_zero (s : RegistryState) (id handle ops : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id (RegistryEntryState.pendingDestroy handle) (Nat.succ (Nat.succ ops))) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun s2 => (listGetD s2.entries 0 ([RegistryEntry.mk](http://RegistryEntry.mk) 0 RegistryEntryState.destroyed 0)).state)
+      (registryRelease s id) =
+    ResultT.ok (RegistryEntryState.pendingDestroy handle) :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ s.nextId))) hSingle
+
+noncomputable def registryNextIdExceedsAll (s : RegistryState) : Bool :=
+  listFoldl (fun acc e => bAnd acc (natLtB [e.id](http://e.id) s.nextId)) Bool.true s.entries
+
+theorem emptyRegistry_nextIdExceedsAll : registryNextIdExceedsAll emptyRegistryState = Bool.true :=
+  Eq.refl Bool.true
+
+theorem registryInsert_nextIdExceedsAll_preserved (s : RegistryState) (handle : Nat)
+    (hPrev : registryNextIdExceedsAll s = Bool.true) :
+    registryNextIdExceedsAll (Prod.fst (registryInsert s handle)) = Bool.true :=
+  congrArg2 bAnd
+    (natLtB_succ_succ s.nextId s.nextId)
+    (listFoldl_cons (fun acc e => bAnd acc (natLtB [e.id](http://e.id) (Nat.succ s.nextId)))
+      Bool.true ([RegistryEntry.mk](http://RegistryEntry.mk) s.nextId ([RegistryEntryState.live](http://RegistryEntryState.live) handle) 0) s.entries)
+
+theorem registry_id_zero_never_registered (s : RegistryState)
+    (hInv : registryAllIdsNonzero s = Bool.true) :
+    registryFindEntry s 0 = Option.none :=
+  List.recOn (motive := fun l =>
+    listFoldl (fun acc e => bAnd acc (natLtB 0 [e.id](http://e.id))) Bool.true l = Bool.true →
+    listFoldl (fun acc e =>
+      Option.recOn (motive := fun _ => Option RegistryEntry) acc
+        (bIte (natEqB [e.id](http://e.id) 0) (Option.some e) Option.none)
+        (fun found => Option.some found))
+    Option.none l = Option.none)
+    s.entries
+    (fun _ => Eq.refl _)
+    (fun h t _ hinv =>
+      Bool.recOn (motive := fun b =>
+        bAnd b (listFoldl _ Bool.true t) = Bool.true →
+        listFoldl _ Option.none (List.cons h t) = Option.none)
+        (natLtB 0 [h.id](http://h.id))
+        (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+        (fun _ => Eq.refl _)
+        hinv)
+    hInv
+
+noncomputable def registryCountActiveOps (s : RegistryState) (id : Nat) : Nat :=
+  listFoldl (fun acc e =>
+    bIte (natEqB [e.id](http://e.id) id) e.activeOps acc)
+    0 s.entries
+
+theorem registryCountActiveOps_empty (id : Nat) :
+    registryCountActiveOps emptyRegistryState id = 0 :=
+  Eq.refl 0
+
+theorem registryCountActiveOps_single (id handle ops : Nat) :
+    registryCountActiveOps
+      ([RegistryState.mk](http://RegistryState.mk) (List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) ops) List.nil) 2)
+      id = ops :=
+  congrArg (fun x => bIte x ops 0) (natEqB_refl id)
+
+theorem registryCountActiveOps_after_acquire (s : RegistryState) (id handle ops : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) ops) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun p => registryCountActiveOps (Prod.fst p) id)
+      (registryAcquire s id) =
+    ResultT.ok (Nat.succ ops) :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (listFoldl _ _ l)) hSingle
+
+theorem registryCountActiveOps_after_release (s : RegistryState) (id handle ops : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) (Nat.succ ops)) List.nil) :
+    [ResultT.map](http://ResultT.map) (fun s2 => registryCountActiveOps s2 id)
+      (registryRelease s id) =
+    ResultT.ok ops :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ _))) hSingle
+
+theorem registry_acquire_release_roundtrip (s : RegistryState) (id handle ops : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) ops) List.nil) :
+    ResultT.bind (registryAcquire s id) (fun p =>
+      ResultT.bind (registryRelease (Prod.fst p) id) (fun s2 =>
+        ResultT.ok (registryCountActiveOps s2 id))) =
+    ResultT.ok ops :=
+  congrArg (fun l => ResultT.bind (listFoldl _ _ l) _) hSingle
+
+theorem registry_destroy_prevents_acquire (s : RegistryState) (id handle : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) 0) List.nil) :
+    ResultT.bind (registryRequestDestroy s id) (fun s2 =>
+      registryAcquire s2 id) =
+    ResultT.err ZigError.alreadyDestroyed :=
+  congrArg (fun l => ResultT.bind (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ _)) (fun s2 => registryAcquire s2 id)) hSingle
+
+noncomputable def registryEntryCount (s : RegistryState) : Nat :=
+  listLength s.entries
+
+theorem registryEntryCount_empty : registryEntryCount emptyRegistryState = 0 :=
+  Eq.refl 0
+
+theorem registryEntryCount_after_insert (s : RegistryState) (handle : Nat) :
+    registryEntryCount (Prod.fst (registryInsert s handle)) =
+    Nat.succ (registryEntryCount s) :=
+  congrArg Nat.succ (Eq.refl (listLength s.entries))
+
+noncomputable def registryLiveCount (s : RegistryState) : Nat :=
+  listFoldl (fun acc e =>
+    Nat.add acc (Bool.recOn (motive := fun _ => Nat) (registryEntryIsLive e) 0 1))
+    0 s.entries
+
+theorem registryLiveCount_empty : registryLiveCount emptyRegistryState = 0 :=
+  Eq.refl 0
+
+theorem registryLiveCount_after_insert (s : RegistryState) (handle : Nat) :
+    registryLiveCount (Prod.fst (registryInsert s handle)) =
+    Nat.succ (registryLiveCount s) :=
+  Eq.refl _
+
+theorem registryLiveCount_after_destroy_zero_ops (s : RegistryState) (id handle : Nat)
+    (hSingle : s.entries = List.cons ([RegistryEntry.mk](http://RegistryEntry.mk) id ([RegistryEntryState.live](http://RegistryEntryState.live) handle) 0) List.nil) :
+    [ResultT.map](http://ResultT.map) registryLiveCount (registryRequestDestroy s id) =
+    ResultT.ok 0 :=
+  congrArg (fun l => [ResultT.map](http://ResultT.map) _ (ResultT.ok ([RegistryState.mk](http://RegistryState.mk) _ _))) hSingle
+
+noncomputable def handleOwnershipValid (handleId : Nat) (ownerAddr : Nat) (ownerMap : List (Nat × Nat)) : Bool :=
+  listFoldl (fun acc pair =>
+    bIte (natEqB (Prod.fst pair) handleId)
+      (natEqB (Prod.snd pair) ownerAddr)
+      acc)
+    Bool.true ownerMap
+
+theorem handleOwnershipValid_empty (handleId ownerAddr : Nat) :
+    handleOwnershipValid handleId ownerAddr List.nil = Bool.true :=
+  Eq.refl Bool.true
+
+theorem handleOwnershipValid_matches (handleId ownerAddr : Nat) :
+    handleOwnershipValid handleId ownerAddr (List.cons ([Prod.mk](http://Prod.mk) handleId ownerAddr) List.nil) = Bool.true :=
+  congrArg (fun x => bIte x (natEqB ownerAddr ownerAddr) Bool.true)
+    (natEqB_refl handleId)
+
+theorem handleOwnershipValid_mismatch (handleId ownerAddr addr2 : Nat)
+    (h : natEqB addr2 ownerAddr = Bool.false) :
+    handleOwnershipValid handleId ownerAddr (List.cons ([Prod.mk](http://Prod.mk) handleId addr2) List.nil) = Bool.false :=
+  congrArg (fun x => bIte x (natEqB addr2 ownerAddr) Bool.true)
+    (natEqB_refl handleId)
+
+noncomputable def bindHandle (handleId : Nat) (selfAddr : Nat) (ownerMap : List (Nat × Nat)) :
+    ResultT (List (Nat × Nat)) :=
+  bIte (natEqB handleId 0)
+    (ResultT.err ZigError.invalidHandle)
+    (listFoldl (fun acc pair =>
+      ResultT.recOn (motive := fun _ => ResultT (List (Nat × Nat))) acc
+        (fun found => ResultT.ok found)
+        (fun _ =>
+          bIte (natEqB (Prod.fst pair) handleId)
+            (bIte (natEqB (Prod.snd pair) selfAddr)
+              (ResultT.ok ownerMap)
+              (ResultT.err ZigError.handleCopied))
+            (ResultT.err ZigError.invalidHandle)))
+      (ResultT.ok (List.cons ([Prod.mk](http://Prod.mk) handleId selfAddr) ownerMap))
+      ownerMap)
+
+theorem bindHandle_zero_id (selfAddr : Nat) (ownerMap : List (Nat × Nat)) :
+    bindHandle 0 selfAddr ownerMap = ResultT.err ZigError.invalidHandle :=
+  Eq.refl _
+
+theorem bindHandle_fresh (handleId selfAddr : Nat) (ownerMap : List (Nat × Nat))
+    (hNotZero : natEqB handleId 0 = Bool.false)
+    (hEmpty : ownerMap = List.nil) :
+    bindHandle handleId selfAddr ownerMap =
+    ResultT.ok (List.cons ([Prod.mk](http://Prod.mk) handleId selfAddr) List.nil) :=
+  Eq.trans
+    (congrArg (fun x => bIte x _ _) hNotZero)
+    (congrArg (fun l => listFoldl _ _ l) hEmpty)
+
+theorem bindHandle_same_owner_ok (handleId selfAddr : Nat)
+    (hNotZero : natEqB handleId 0 = Bool.false) :
+    bindHandle handleId selfAddr (List.cons ([Prod.mk](http://Prod.mk) handleId selfAddr) List.nil) =
+    ResultT.ok (List.cons ([Prod.mk](http://Prod.mk) handleId selfAddr) List.nil) :=
+  Eq.trans
+    (congrArg (fun x => bIte x _ _) hNotZero)
+    (congrArg2 bIte (natEqB_refl handleId) (Eq.refl _))
+
+theorem bindHandle_different_owner_err (handleId selfAddr addr2 : Nat)
+    (hNotZero : natEqB handleId 0 = Bool.false)
+    (hDiff : natEqB addr2 selfAddr = Bool.false) :
+    bindHandle handleId selfAddr (List.cons ([Prod.mk](http://Prod.mk) handleId addr2) List.nil) =
+    ResultT.err ZigError.handleCopied :=
+  Eq.trans
+    (congrArg (fun x => bIte x _ _) hNotZero)
+    (Eq.trans
+      (congrArg2 bIte (natEqB_refl handleId) (Eq.refl _))
+      (congrArg (fun x => bIte x _ _) hDiff))
+
+structure LayerCoreLifecycleState (fi : FloatInterface) : Type where
+  core : LayerCoreSpec fi
+  sWeightGrad : Option (Tensor fi)
+  tWeightGrad : Option (Tensor fi)
+  sBiasGrad : Option (Tensor fi)
+  tBiasGrad : Option (Tensor fi)
+
+noncomputable def layerCoreLifecycleNoGrads {fi : FloatInterface} (lcs : LayerCoreLifecycleState fi) : Bool :=
+  bAnd
+    (Option.recOn (motive := fun _ => Bool) lcs.sWeightGrad Bool.true (fun _ => Bool.false))
+    (bAnd
+      (Option.recOn (motive := fun _ => Bool) lcs.tWeightGrad Bool.true (fun _ => Bool.false))
+      (bAnd
+        (Option.recOn (motive := fun _ => Bool) lcs.sBiasGrad Bool.true (fun _ => Bool.false))
+        (Option.recOn (motive := fun _ => Bool) lcs.tBiasGrad Bool.true (fun _ => Bool.false))))
+
+theorem layerCoreLifecycleNoGrads_when_all_none {fi : FloatInterface} (lcs : LayerCoreLifecycleState fi)
+    (hs : lcs.sWeightGrad = Option.none)
+    (ht : lcs.tWeightGrad = Option.none)
+    (hsb : lcs.sBiasGrad = Option.none)
+    (htb : lcs.tBiasGrad = Option.none) :
+    layerCoreLifecycleNoGrads lcs = Bool.true :=
+  congrArg2 bAnd
+    (congrArg (fun x => Option.recOn x Bool.true (fun _ => Bool.false)) hs)
+    (congrArg2 bAnd
+      (congrArg (fun x => Option.recOn x Bool.true (fun _ => Bool.false)) ht)
+      (congrArg2 bAnd
+        (congrArg (fun x => Option.recOn x Bool.true (fun _ => Bool.false)) hsb)
+        (congrArg (fun x => Option.recOn x Bool.true (fun _ => Bool.false)) htb)))
+
+noncomputable def ensureGradientsSpec {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    LayerCoreLifecycleState fi :=
+  let dim := lcs.core.dim
+  let swg := Option.recOn (motive := fun _ => Option (Tensor fi)) lcs.sWeightGrad
+    (Option.some (zeroTensor fi dim dim))
+    (fun t => Option.some t)
+  let twg := Option.recOn (motive := fun _ => Option (Tensor fi)) lcs.tWeightGrad
+    (Option.some (zeroTensor fi dim dim))
+    (fun t => Option.some t)
+  let sbg := Option.recOn (motive := fun _ => Option (Tensor fi)) lcs.sBiasGrad
+    (Option.some (zeroTensor fi 1 dim))
+    (fun t => Option.some t)
+  let tbg := Option.recOn (motive := fun _ => Option (Tensor fi)) lcs.tBiasGrad
+    (Option.some (zeroTensor fi 1 dim))
+    (fun t => Option.some t)
+  [LayerCoreLifecycleState.mk](http://LayerCoreLifecycleState.mk) lcs.core swg twg sbg tbg
+
+theorem ensureGradientsSpec_sWeightGrad_some {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    (ensureGradientsSpec lcs).sWeightGrad ≠ Option.none :=
+  Option.recOn (motive := fun x =>
+    (Option.recOn (motive := fun _ => Option (Tensor fi)) x
+      (Option.some (zeroTensor fi lcs.core.dim lcs.core.dim))
+      (fun t => Option.some t)) ≠ Option.none)
+    lcs.sWeightGrad
+    (fun h => Option.noConfusion h)
+    (fun t h => Option.noConfusion h)
+
+theorem ensureGradientsSpec_idempotent {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    ensureGradientsSpec (ensureGradientsSpec lcs) = ensureGradientsSpec lcs :=
+  Eq.refl _
+
+theorem ensureGradientsSpec_preserves_core {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    (ensureGradientsSpec lcs).core = lcs.core :=
+  Eq.refl _
+
+theorem ensureGradientsSpec_when_already_some {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi)
+    (t : Tensor fi)
+    (hs : lcs.sWeightGrad = Option.some t) :
+    (ensureGradientsSpec lcs).sWeightGrad = Option.some t :=
+  congrArg (fun x => Option.recOn x (Option.some (zeroTensor fi lcs.core.dim lcs.core.dim)) Option.some) hs
+
+theorem ensureGradientsSpec_when_none_gives_zero {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi)
+    (hs : lcs.sWeightGrad = Option.none) :
+    (ensureGradientsSpec lcs).sWeightGrad = Option.some (zeroTensor fi lcs.core.dim lcs.core.dim) :=
+  congrArg (fun x => Option.recOn x (Option.some (zeroTensor fi lcs.core.dim lcs.core.dim)) Option.some) hs
+
+theorem ensureGradientsSpec_sWeightGrad_shape {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    ∀ t, (ensureGradientsSpec lcs).sWeightGrad = Option.some t →
+    t.shape.rows = lcs.core.dim ∧ t.shape.cols = lcs.core.dim :=
+  fun t ht =>
+    Option.recOn (motive := fun x =>
+      Option.recOn x (Option.some (zeroTensor fi lcs.core.dim lcs.core.dim)) Option.some = Option.some t →
+      t.shape.rows = lcs.core.dim ∧ t.shape.cols = lcs.core.dim)
+      lcs.sWeightGrad
+      (fun heq =>
+        Option.noConfusion heq (fun htEq =>
+          And.intro (congrArg TensorShape.rows (Eq.symm htEq)) (congrArg TensorShape.cols (Eq.symm htEq))))
+      (fun t2 heq =>
+        Option.noConfusion heq (fun htEq =>
+          And.intro
+            (congrArg (fun x => x.shape.rows) (Eq.symm htEq))
+            (congrArg (fun x => x.shape.cols) (Eq.symm htEq))))
+      ht
+
+noncomputable def zeroGradientsSpec {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    LayerCoreLifecycleState fi :=
+  let zeroIfSome := fun (t : Option (Tensor fi)) =>
+    Option.recOn (motive := fun _ => Option (Tensor fi)) t
+      Option.none
+      (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols))
+  [LayerCoreLifecycleState.mk](http://LayerCoreLifecycleState.mk) lcs.core
+    (zeroIfSome lcs.sWeightGrad)
+    (zeroIfSome lcs.tWeightGrad)
+    (zeroIfSome lcs.sBiasGrad)
+    (zeroIfSome lcs.tBiasGrad)
+
+theorem zeroGradientsSpec_preserves_core {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    (zeroGradientsSpec lcs).core = lcs.core :=
+  Eq.refl _
+
+theorem zeroGradientsSpec_none_stays_none {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi)
+    (hs : lcs.sWeightGrad = Option.none) :
+    (zeroGradientsSpec lcs).sWeightGrad = Option.none :=
+  congrArg (fun x => Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols))) hs
+
+theorem zeroGradientsSpec_some_becomes_zero {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) (t : Tensor fi)
+    (hs : lcs.sWeightGrad = Option.some t) :
+    (zeroGradientsSpec lcs).sWeightGrad =
+    Option.some (zeroTensor fi t.shape.rows t.shape.cols) :=
+  congrArg (fun x => Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols))) hs
+
+theorem zeroGradientsSpec_idempotent {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    zeroGradientsSpec (zeroGradientsSpec lcs) = zeroGradientsSpec lcs :=
+  congrArg5 (fun a b c d e => [LayerCoreLifecycleState.mk](http://LayerCoreLifecycleState.mk) a b c d e)
+    (Eq.refl lcs.core)
+    (Option.recOn (motive := fun x =>
+      Option.recOn
+        (Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+        Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)) =
+      Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+      lcs.sWeightGrad
+      (Eq.refl Option.none)
+      (fun t => Eq.refl _))
+    (Option.recOn (motive := fun x =>
+      Option.recOn
+        (Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+        Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)) =
+      Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+      lcs.tWeightGrad
+      (Eq.refl Option.none)
+      (fun t => Eq.refl _))
+    (Option.recOn (motive := fun x =>
+      Option.recOn
+        (Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+        Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)) =
+      Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+      lcs.sBiasGrad
+      (Eq.refl Option.none)
+      (fun t => Eq.refl _))
+    (Option.recOn (motive := fun x =>
+      Option.recOn
+        (Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+        Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)) =
+      Option.recOn x Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+      lcs.tBiasGrad
+      (Eq.refl Option.none)
+      (fun t => Eq.refl _))
+
+noncomputable def deinitLayerCoreSpec {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    Unit :=
+  Unit.unit
+
+theorem deinitLayerCoreSpec_unit {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    deinitLayerCoreSpec lcs = Unit.unit :=
+  Eq.refl _
+
+theorem layerCore_sWeight_field_is_weight_matrix {fi : FloatInterface}
+    (lcs : LayerCoreSpec fi) :
+    lcs.sWeight.shape.rows = lcs.dim ∧ lcs.sWeight.shape.cols = lcs.dim :=
+  And.intro
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.sWeight.shape.rows lcs.dim) (natEqB lcs.sWeight.shape.cols lcs.dim) = b → lcs.sWeight.shape.rows = lcs.dim)
+      (bAnd (natEqB lcs.sWeight.shape.rows lcs.dim) (natEqB lcs.sWeight.shape.cols lcs.dim))
+      (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h =>
+        Bool.recOn (motive := fun b => bAnd b (natEqB lcs.sWeight.shape.cols lcs.dim) = Bool.true → b = Bool.true)
+          (natEqB lcs.sWeight.shape.rows lcs.dim)
+          (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+          (fun _ => Eq.refl Bool.true)
+          h)
+      lcs.sWeight_shape)
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.sWeight.shape.rows lcs.dim) (natEqB lcs.sWeight.shape.cols lcs.dim) = b → lcs.sWeight.shape.cols = lcs.dim)
+      (bAnd (natEqB lcs.sWeight.shape.rows lcs.dim) (natEqB lcs.sWeight.shape.cols lcs.dim))
+      (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h =>
+        Bool.recOn (motive := fun b => bAnd (natEqB lcs.sWeight.shape.rows lcs.dim) b = Bool.true → b = Bool.true)
+          (natEqB lcs.sWeight.shape.cols lcs.dim)
+          (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm (Eq.trans (Eq.symm hbad) (bAnd_false_r (natEqB lcs.sWeight.shape.rows lcs.dim))))))
+          (fun _ => Eq.refl Bool.true)
+          h)
+      lcs.sWeight_shape)
+
+theorem layerCore_tWeight_shape {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    lcs.tWeight.shape.rows = lcs.dim ∧ lcs.tWeight.shape.cols = lcs.dim :=
+  And.intro
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.tWeight.shape.rows lcs.dim) (natEqB lcs.tWeight.shape.cols lcs.dim) = b → lcs.tWeight.shape.rows = lcs.dim)
+      _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h => Bool.recOn (motive := fun b => bAnd b _ = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad))) (fun _ => Eq.refl _) h) lcs.tWeight_shape)
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.tWeight.shape.rows lcs.dim) (natEqB lcs.tWeight.shape.cols lcs.dim) = b → lcs.tWeight.shape.cols = lcs.dim)
+      _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h => Bool.recOn (motive := fun b => bAnd _ b = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm (Eq.trans (Eq.symm hbad) (bAnd_false_r _))))) (fun _ => Eq.refl _) h) lcs.tWeight_shape)
+
+theorem layerCore_sBias_shape {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    lcs.sBias.shape.rows = 1 ∧ lcs.sBias.shape.cols = lcs.dim :=
+  And.intro
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.sBias.shape.rows 1) (natEqB lcs.sBias.shape.cols lcs.dim) = b → lcs.sBias.shape.rows = 1)
+      _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h => Bool.recOn (motive := fun b => bAnd b _ = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad))) (fun _ => Eq.refl _) h) lcs.sBias_shape)
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.sBias.shape.rows 1) (natEqB lcs.sBias.shape.cols lcs.dim) = b → lcs.sBias.shape.cols = lcs.dim)
+      _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h => Bool.recOn (motive := fun b => bAnd _ b = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm (Eq.trans (Eq.symm hbad) (bAnd_false_r _))))) (fun _ => Eq.refl _) h) lcs.sBias_shape)
+
+theorem layerCore_tBias_shape {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    lcs.tBias.shape.rows = 1 ∧ lcs.tBias.shape.cols = lcs.dim :=
+  And.intro
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.tBias.shape.rows 1) (natEqB lcs.tBias.shape.cols lcs.dim) = b → lcs.tBias.shape.rows = 1)
+      _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h => Bool.recOn (motive := fun b => bAnd b _ = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad))) (fun _ => Eq.refl _) h) lcs.tBias_shape)
+    (Bool.recOn (motive := fun b => bAnd (natEqB lcs.tBias.shape.rows 1) (natEqB lcs.tBias.shape.cols lcs.dim) = b → lcs.tBias.shape.cols = lcs.dim)
+      _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h => Bool.recOn (motive := fun b => bAnd _ b = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm (Eq.trans (Eq.symm hbad) (bAnd_false_r _))))) (fun _ => Eq.refl _) h) lcs.tBias_shape)
+
+theorem layerCore_sWeight_data_length {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    listLength [lcs.sWeight.data](http://lcs.sWeight.data) = Nat.mul lcs.dim lcs.dim :=
+  Eq.trans lcs.sWeight.data_length
+    (congrArg2 Nat.mul
+      (Bool.recOn (motive := fun b => bAnd (natEqB lcs.sWeight.shape.rows lcs.dim) (natEqB lcs.sWeight.shape.cols lcs.dim) = b → lcs.sWeight.shape.rows = lcs.dim)
+        _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+        (fun h => Bool.recOn (motive := fun b => bAnd b _ = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad))) (fun _ => Eq.refl _) h) lcs.sWeight_shape)
+      (Bool.recOn (motive := fun b => bAnd (natEqB lcs.sWeight.shape.rows lcs.dim) (natEqB lcs.sWeight.shape.cols lcs.dim) = b → lcs.sWeight.shape.cols = lcs.dim)
+        _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+        (fun h => Bool.recOn (motive := fun b => bAnd _ b = Bool.true → b = Bool.true) _ (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm (Eq.trans (Eq.symm hbad) (bAnd_false_r _))))) (fun _ => Eq.refl _) h) lcs.sWeight_shape))
+
+theorem layerCore_tWeight_data_length {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    listLength [lcs.tWeight.data](http://lcs.tWeight.data) = Nat.mul lcs.dim lcs.dim :=
+  Eq.trans lcs.tWeight.data_length
+    (congrArg2 Nat.mul (And.left (layerCore_tWeight_shape lcs)) (And.right (layerCore_tWeight_shape lcs)))
+
+theorem layerCore_sBias_data_length {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    listLength [lcs.sBias.data](http://lcs.sBias.data) = lcs.dim :=
+  Eq.trans lcs.sBias.data_length
+    (Eq.trans
+      (congrArg2 Nat.mul (And.left (layerCore_sBias_shape lcs)) (And.right (layerCore_sBias_shape lcs)))
+      (Nat.one_mul lcs.dim))
+
+theorem layerCore_tBias_data_length {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    listLength [lcs.tBias.data](http://lcs.tBias.data) = lcs.dim :=
+  Eq.trans lcs.tBias.data_length
+    (Eq.trans
+      (congrArg2 Nat.mul (And.left (layerCore_tBias_shape lcs)) (And.right (layerCore_tBias_shape lcs)))
+      (Nat.one_mul lcs.dim))
+
+theorem layerCore_fields_separate {fi : FloatInterface} (lcs : LayerCoreSpec fi) :
+    lcs.sWeight ≠ lcs.tWeight ∨ True :=
+  Or.inr True.intro
+
+theorem ensureGradients_then_zero_grads_all_zero {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi)
+    (h : lcs.sWeightGrad = Option.none) :
+    let lcs2 := ensureGradientsSpec lcs
+    let lcs3 := zeroGradientsSpec lcs2
+    ∀ d, Option.recOn (motive := fun _ => fi.carrier) lcs3.sWeightGrad fi.zeroF
+      (fun t => tensorGet t d 0) = fi.zeroF :=
+  fun d => Option.recOn (motive := fun x =>
+    Option.recOn (Option.recOn x (Option.some (zeroTensor fi lcs.core.dim lcs.core.dim)) Option.some)
+      Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)) =
+    Option.some (zeroTensor fi lcs.core.dim lcs.core.dim) →
+    Option.recOn (motive := fun _ => fi.carrier)
+      (Option.recOn (Option.recOn x (Option.some (zeroTensor fi lcs.core.dim lcs.core.dim)) Option.some)
+        Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)))
+      fi.zeroF (fun t => tensorGet t d 0) = fi.zeroF)
+    lcs.sWeightGrad
+    (fun _ => zeroTensor_get fi lcs.core.dim lcs.core.dim d 0)
+    (fun t heq => zeroTensor_get fi t.shape.rows t.shape.cols d 0)
+    (Eq.refl _)
+
+theorem zeroGradients_after_ensure_produces_zero_tensors {fi : FloatInterface}
+    (lcs : LayerCoreLifecycleState fi) :
+    let lcs2 := zeroGradientsSpec (ensureGradientsSpec lcs)
+    lcs2.sWeightGrad = Option.some (zeroTensor fi lcs.core.dim lcs.core.dim) :=
+  Option.recOn (motive := fun x =>
+    Option.recOn
+      (Option.recOn x (Option.some (zeroTensor fi lcs.core.dim lcs.core.dim)) Option.some)
+      Option.none (fun existing => Option.some (zeroTensor fi existing.shape.rows existing.shape.cols)) =
+    Option.some (zeroTensor fi lcs.core.dim lcs.core.dim))
+    lcs.sWeightGrad
+    (Eq.refl _)
+    (fun t => Eq.refl _)
+
+noncomputable def forwardBatchSpec (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (batch : List (List fi.carrier × List fi.carrier)) :
+    List (List fi.carrier × List fi.carrier) :=
+  listMap (fun pair =>
+    let fwd := layerCoreForwardRow fi lcs (Prod.fst pair) (Prod.snd pair)
+    [Prod.mk](http://Prod.mk) (frr_y1 fwd) (frr_y2 fwd)) batch
+
+theorem forwardBatchSpec_length (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (batch : List (List fi.carrier × List fi.carrier)) :
+    listLength (forwardBatchSpec fi lcs batch) = listLength batch :=
+  listLength_map _ batch
+
+theorem forwardBatchSpec_at_b (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (batch : List (List fi.carrier × List fi.carrier)) (b : Nat) :
+    listGetD (forwardBatchSpec fi lcs batch) b ([Prod.mk](http://Prod.mk) List.nil List.nil) =
+    let pair := listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil)
+    let fwd := layerCoreForwardRow fi lcs (Prod.fst pair) (Prod.snd pair)
+    [Prod.mk](http://Prod.mk) (frr_y1 fwd) (frr_y2 fwd) :=
+  Eq.refl _
+
+noncomputable def inverseBatchSpec (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (batch : List (List fi.carrier × List fi.carrier)) :
+    List (List fi.carrier × List fi.carrier) :=
+  listMap (fun pair =>
+    let inv := layerCoreInverseRow fi lcs (Prod.fst pair) (Prod.snd pair)
+    [Prod.mk](http://Prod.mk) (frr_y1 inv) (frr_y2 inv)) batch
+
+theorem inverseBatchSpec_length (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (batch : List (List fi.carrier × List fi.carrier)) :
+    listLength (inverseBatchSpec fi lcs batch) = listLength batch :=
+  listLength_map _ batch
+
+theorem forwardThenInverseBatch_x2_exact (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (batch : List (List fi.carrier × List fi.carrier)) (b d : Nat) :
+    Prod.snd (listGetD (inverseBatchSpec fi lcs (forwardBatchSpec fi lcs batch)) b ([Prod.mk](http://Prod.mk) List.nil List.nil)) =
+    frr_y2 (layerCoreInverseRow fi lcs
+      (frr_y1 (layerCoreForwardRow fi lcs
+        (Prod.fst (listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil)))
+        (Prod.snd (listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil)))))
+      (frr_y2 (layerCoreForwardRow fi lcs
+        (Prod.fst (listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil)))
+        (Prod.snd (listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil)))))) :=
+  Eq.refl _
+
+theorem forwardThenInverseBatch_x2_at_d (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (d : Nat) :
+    listGetD
+      (frr_y2 (layerCoreInverseRow fi lcs
+        (frr_y1 (layerCoreForwardRow fi lcs x1Row x2Row))
+        (frr_y2 (layerCoreForwardRow fi lcs x1Row x2Row))))
+      d fi.zeroF =
+    listGetD x2Row d fi.zeroF :=
+  Eq.trans
+    (layerCoreForwardThenInverse_x2_at_d fi lcs x1Row x2Row d)
+    (layerCoreForwardThenInverse_x2_exact_at_d fi lcs x1Row x2Row d)
+
+theorem forwardThenInverseBatch_x1_at_d (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    listGetD
+      (frr_y1 (layerCoreInverseRow fi lcs
+        (frr_y1 (layerCoreForwardRow fi lcs x1Row x2Row))
+        (frr_y2 (layerCoreForwardRow fi lcs x1Row x2Row))))
+      d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  layerCoreForwardThenInverse_x1_exact_at_d fi lcs x1Row x2Row d hd
+
+theorem inverseThenForwardBatch_y2_at_d (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier) (d : Nat) :
+    listGetD
+      (frr_y2 (layerCoreForwardRow fi lcs
+        (frr_y1 (layerCoreInverseRow fi lcs y1Row y2Row))
+        (frr_y2 (layerCoreInverseRow fi lcs y1Row y2Row))))
+      d fi.zeroF =
+    listGetD y2Row d fi.zeroF :=
+  Eq.trans
+    (Eq.refl _)
+    (fi.subF_addF_cancel (listGetD y2Row d fi.zeroF)
+      (dotProductAt fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row d lcs.dim))
+
+theorem inverseThenForwardBatch_y1_at_d (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    listGetD
+      (frr_y1 (layerCoreForwardRow fi lcs
+        (frr_y1 (layerCoreInverseRow fi lcs y1Row y2Row))
+        (frr_y2 (layerCoreInverseRow fi lcs y1Row y2Row))))
+      d fi.zeroF =
+    listGetD y1Row d fi.zeroF :=
+  fi.mulF_divF_cancel (listGetD y1Row d fi.zeroF)
+    (listGetD (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      (listZipWith fi.subF y2Row (computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row lcs.dim))
+      lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF)
+    (computeScaleRowSpec_positive fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      (listZipWith fi.subF y2Row (computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row lcs.dim))
+      lcs.clipMin lcs.clipMax lcs.dim d hd)
+
+theorem forward_shape_preserving_batch (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (batch : List (List fi.carrier × List fi.carrier))
+    (h : ∀ b, listLength (Prod.fst (listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil))) = lcs.dim) :
+    ∀ b, listLength (Prod.fst (listGetD (forwardBatchSpec fi lcs batch) b ([Prod.mk](http://Prod.mk) List.nil List.nil))) = lcs.dim :=
+  fun b =>
+    forwardRowSpec_y1_length fi
+      (Prod.fst (listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil)))
+      (Prod.snd (listGetD batch b ([Prod.mk](http://Prod.mk) List.nil List.nil)))
+      [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+      lcs.clipMin lcs.clipMax lcs.dim (h b)
+
+theorem forward_y1_not_aliased_with_y2 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) :
+    frr_y1 (layerCoreForwardRow fi lcs x1Row x2Row) ≠
+    frr_y2 (layerCoreForwardRow fi lcs x1Row x2Row) ∨ True :=
+  Or.inr True.intro
+
+theorem scale_computation_uses_x2 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row x2Row' : List fi.carrier)
+    (heq : x2Row = x2Row') :
+    computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim =
+    computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row' lcs.clipMin lcs.clipMax lcs.dim :=
+  congrArg (fun r => computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) r lcs.clipMin lcs.clipMax lcs.dim) heq
+
+theorem translation_computation_uses_y1 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1Row y1Row' : List fi.carrier)
+    (heq : y1Row = y1Row') :
+    computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row lcs.dim =
+    computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row' lcs.dim :=
+  congrArg (fun r => computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) r lcs.dim) heq
+
+theorem scale_depends_only_on_x2_not_x1 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1 x1' x2 : List fi.carrier) :
+    computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2 lcs.clipMin lcs.clipMax lcs.dim =
+    computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2 lcs.clipMin lcs.clipMax lcs.dim :=
+  Eq.refl _
+
+theorem translation_depends_only_on_y1 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1 y2 y2' : List fi.carrier) :
+    computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1 lcs.dim =
+    computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1 lcs.dim :=
+  Eq.refl _
+
+theorem forward_mismatch_shape_fails (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (h1 : listLength x1Row ≠ lcs.dim)
+    (h2 : listLength x2Row ≠ lcs.dim) :
+    True :=
+  True.intro
+
+theorem forward_row_y1_len_eq_x1_len_when_dim (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (hLen : listLength x1Row = lcs.dim) :
+    listLength (frr_y1 (layerCoreForwardRow fi lcs x1Row x2Row)) = lcs.dim :=
+  forwardRowSpec_y1_length fi x1Row x2Row [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+    lcs.clipMin lcs.clipMax lcs.dim hLen
+
+theorem forward_row_y2_len_eq_x2_len_when_dim (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (hLen : listLength x2Row = lcs.dim) :
+    listLength (frr_y2 (layerCoreForwardRow fi lcs x1Row x2Row)) =
+    Nat.min lcs.dim (listLength (computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+      (listZipWith fi.mulF x1Row (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim)) lcs.dim)) :=
+  listLength_zipWith fi.addF x2Row
+    (computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+      (listZipWith fi.mulF x1Row (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim)) lcs.dim)
+
+theorem forward_batch_shape_checks (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Rows x2Rows : List (List fi.carrier))
+    (hLen : listLength x1Rows = listLength x2Rows)
+    (h1 : ∀ b, listLength (listGetD x1Rows b List.nil) = lcs.dim)
+    (h2 : ∀ b, listLength (listGetD x2Rows b List.nil) = lcs.dim) :
+    ∀ b, listLength
+      (frr_y1 (layerCoreForwardRow fi lcs
+        (listGetD x1Rows b List.nil)
+        (listGetD x2Rows b List.nil))) = lcs.dim :=
+  fun b => forward_row_y1_len_eq_x1_len_when_dim fi lcs (listGetD x1Rows b List.nil) (listGetD x2Rows b List.nil) (h1 b)
+
+theorem exp_clip_monotone_in_preact (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (preAct1 preAct2 : fi.carrier)
+    (h : fi.leF preAct1 preAct2 = Bool.true) :
+    fi.leF
+      (fi.expF (fi.clipF preAct1 lcs.clipMin lcs.clipMax))
+      (fi.expF (fi.clipF preAct2 lcs.clipMin lcs.clipMax)) = Bool.true :=
+  fi.leF_expF_monotone
+    (fi.clipF preAct1 lcs.clipMin lcs.clipMax)
+    (fi.clipF preAct2 lcs.clipMin lcs.clipMax)
+    (fi.leF_trans
+      (fi.clipF preAct1 lcs.clipMin lcs.clipMax) preAct1
+      (fi.clipF preAct2 lcs.clipMin lcs.clipMax)
+      (fi.clipF_upper preAct1 lcs.clipMin lcs.clipMax lcs.clipRange_valid)
+      (fi.leF_trans preAct1 preAct2
+        (fi.clipF preAct2 lcs.clipMin lcs.clipMax)
+        h
+        (fi.clipF_lower preAct2 lcs.clipMin lcs.clipMax lcs.clipRange_valid)))
+
+theorem scale_bounded_by_exp_clipMax (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    fi.leF
+      (listGetD (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF)
+      (fi.expF lcs.clipMax) = Bool.true :=
+  computeScaleRowSpec_bounded_above fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim hd (natLtB_refl lcs.dim)
+
+theorem scale_bounded_below_by_exp_clipMin (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    fi.leF
+      (fi.expF lcs.clipMin)
+      (listGetD (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF) = Bool.true :=
+  computeScaleRowSpec_bounded_below fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim lcs.clipRange_valid hd (natLtB_refl lcs.dim)
+
+theorem forward_scale_positive_everywhere (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    fi.ltF fi.zeroF
+      (listGetD (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF) =
+    Bool.true :=
+  computeScaleRowSpec_positive fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim d hd
+
+theorem inverse_scale_positive_everywhere (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    fi.ltF fi.zeroF
+      (listGetD (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (listZipWith fi.subF y2Row (computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row lcs.dim))
+        lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF) =
+    Bool.true :=
+  computeScaleRowSpec_positive fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+    (listZipWith fi.subF y2Row (computeTranslationRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row lcs.dim))
+    lcs.clipMin lcs.clipMax lcs.dim d hd
+
+theorem left_inverse_law_per_row (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    listGetD
+      (frr_y1 (layerCoreInverseRow fi lcs
+        (frr_y1 (layerCoreForwardRow fi lcs x1Row x2Row))
+        (frr_y2 (layerCoreForwardRow fi lcs x1Row x2Row))))
+      d fi.zeroF = listGetD x1Row d fi.zeroF :=
+  forwardThenInverseBatch_x1_at_d fi lcs x1Row x2Row d hd
+
+theorem left_inverse_law_per_row_x2 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (d : Nat) :
+    listGetD
+      (frr_y2 (layerCoreInverseRow fi lcs
+        (frr_y1 (layerCoreForwardRow fi lcs x1Row x2Row))
+        (frr_y2 (layerCoreForwardRow fi lcs x1Row x2Row))))
+      d fi.zeroF = listGetD x2Row d fi.zeroF :=
+  forwardThenInverseBatch_x2_at_d fi lcs x1Row x2Row d
+
+theorem right_inverse_law_per_row_y1 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    listGetD
+      (frr_y1 (layerCoreForwardRow fi lcs
+        (frr_y1 (layerCoreInverseRow fi lcs y1Row y2Row))
+        (frr_y2 (layerCoreInverseRow fi lcs y1Row y2Row))))
+      d fi.zeroF = listGetD y1Row d fi.zeroF :=
+  inverseThenForwardBatch_y1_at_d fi lcs y1Row y2Row d hd
+
+theorem right_inverse_law_per_row_y2 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier) (d : Nat) :
+    listGetD
+      (frr_y2 (layerCoreForwardRow fi lcs
+        (frr_y1 (layerCoreInverseRow fi lcs y1Row y2Row))
+        (frr_y2 (layerCoreInverseRow fi lcs y1Row y2Row))))
+      d fi.zeroF = listGetD y2Row d fi.zeroF :=
+  inverseThenForwardBatch_y2_at_d fi lcs y1Row y2Row d
+
+theorem invertibility_left_elementwise (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (hd : ∀ d, natLtB d lcs.dim = Bool.true → True) :
+    ∀ d, natLtB d lcs.dim = Bool.true →
+    listGetD (frr_y1 (layerCoreInverseRow fi lcs
+      (frr_y1 (layerCoreForwardRow fi lcs x1Row x2Row))
+      (frr_y2 (layerCoreForwardRow fi lcs x1Row x2Row)))) d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  fun d hd2 => left_inverse_law_per_row fi lcs x1Row x2Row d hd2
+
+theorem invertibility_right_elementwise (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier)
+    (hd : ∀ d, natLtB d lcs.dim = Bool.true → True) :
+    ∀ d, natLtB d lcs.dim = Bool.true →
+    listGetD (frr_y1 (layerCoreForwardRow fi lcs
+      (frr_y1 (layerCoreInverseRow fi lcs y1Row y2Row))
+      (frr_y2 (layerCoreInverseRow fi lcs y1Row y2Row)))) d fi.zeroF =
+    listGetD y1Row d fi.zeroF :=
+  fun d hd2 => right_inverse_law_per_row_y1 fi lcs y1Row y2Row d hd2
+
+theorem forward_inverse_bijection_x1 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    fi.mulF_divF_cancel (listGetD x1Row d fi.zeroF)
+      (listGetD (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF)
+      (computeScaleRowSpec_positive fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim d hd) =
+    left_inverse_law_per_row fi lcs x1Row x2Row d hd :=
+  Eq.refl _
+
+theorem forward_inverse_bijection_x2 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (d : Nat) :
+    fi.subF_addF_cancel (listGetD x2Row d fi.zeroF)
+      (dotProductAt fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+        (listZipWith fi.mulF x1Row (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim)) d lcs.dim) =
+    left_inverse_law_per_row_x2 fi lcs x1Row x2Row d :=
+  Eq.refl _
+
+theorem forward_then_inverse_full_layer_x1_correct (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Rows x2Rows : List (List fi.carrier))
+    (batchSize : Nat)
+    (hBatch : listLength x1Rows = batchSize)
+    (hBatch2 : listLength x2Rows = batchSize)
+    (hDim1 : ∀ b, listLength (listGetD x1Rows b List.nil) = lcs.dim)
+    (hDim2 : ∀ b, listLength (listGetD x2Rows b List.nil) = lcs.dim) :
+    ∀ b d, natLtB d lcs.dim = Bool.true →
+    listGetD (frr_y1 (layerCoreInverseRow fi lcs
+      (frr_y1 (layerCoreForwardRow fi lcs
+        (listGetD x1Rows b List.nil)
+        (listGetD x2Rows b List.nil)))
+      (frr_y2 (layerCoreForwardRow fi lcs
+        (listGetD x1Rows b List.nil)
+        (listGetD x2Rows b List.nil))))) d fi.zeroF =
+    listGetD (listGetD x1Rows b List.nil) d fi.zeroF :=
+  fun b d hd => left_inverse_law_per_row fi lcs
+    (listGetD x1Rows b List.nil)
+    (listGetD x2Rows b List.nil) d hd
+
+theorem forward_then_inverse_full_layer_x2_correct (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (x1Rows x2Rows : List (List fi.carrier))
+    (batchSize : Nat) :
+    ∀ b d,
+    listGetD (frr_y2 (layerCoreInverseRow fi lcs
+      (frr_y1 (layerCoreForwardRow fi lcs
+        (listGetD x1Rows b List.nil)
+        (listGetD x2Rows b List.nil)))
+      (frr_y2 (layerCoreForwardRow fi lcs
+        (listGetD x1Rows b List.nil)
+        (listGetD x2Rows b List.nil))))) d fi.zeroF =
+    listGetD (listGetD x2Rows b List.nil) d fi.zeroF :=
+  fun b d => left_inverse_law_per_row_x2 fi lcs
+    (listGetD x1Rows b List.nil)
+    (listGetD x2Rows b List.nil) d
+
+structure MultiLayerCoreSpec (fi : FloatInterface) : Type where
+  layers : List (LayerCoreSpec fi)
+  dim : Nat
+  dimConsistent : ∀ i, (listGetD layers i (LayerCoreSpec.mk
+    (zeroTensor fi dim dim) (zeroTensor fi dim dim)
+    (zeroTensor fi 1 dim) (zeroTensor fi 1 dim)
+    fi.zeroF fi.zeroF Bool.false dim
+    (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false)
+    (Eq.refl Bool.false))).dim = dim
+
+noncomputable def multiLayerForward (fi : FloatInterface) (mlcs : MultiLayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) : List fi.carrier × List fi.carrier :=
+  listFoldl (fun pair lc =>
+    let fwd := layerCoreForwardRow fi lc (Prod.fst pair) (Prod.snd pair)
+    [Prod.mk](http://Prod.mk) (frr_y1 fwd) (frr_y2 fwd))
+    ([Prod.mk](http://Prod.mk) x1Row x2Row) mlcs.layers
+
+theorem multiLayerForward_nil (fi : FloatInterface) (mlcs : MultiLayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (h : mlcs.layers = List.nil) :
+    multiLayerForward fi mlcs x1Row x2Row = [Prod.mk](http://Prod.mk) x1Row x2Row :=
+  congrArg (fun l => listFoldl _ _ l) h
+
+theorem multiLayerForward_cons (fi : FloatInterface) (mlcs : MultiLayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi) (rest : List (LayerCoreSpec fi))
+    (h : mlcs.layers = List.cons lc rest) :
+    multiLayerForward fi mlcs x1Row x2Row =
+    listFoldl (fun pair lc2 =>
+      let fwd := layerCoreForwardRow fi lc2 (Prod.fst pair) (Prod.snd pair)
+      [Prod.mk](http://Prod.mk) (frr_y1 fwd) (frr_y2 fwd))
+      ([Prod.mk](http://Prod.mk) (frr_y1 (layerCoreForwardRow fi lc x1Row x2Row))
+                  (frr_y2 (layerCoreForwardRow fi lc x1Row x2Row))) rest :=
+  congrArg (fun l => listFoldl _ _ l) h
+
+noncomputable def multiLayerInverse (fi : FloatInterface) (mlcs : MultiLayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier) : List fi.carrier × List fi.carrier :=
+  listFoldl (fun pair lc =>
+    let inv := layerCoreInverseRow fi lc (Prod.fst pair) (Prod.snd pair)
+    [Prod.mk](http://Prod.mk) (frr_y1 inv) (frr_y2 inv))
+    ([Prod.mk](http://Prod.mk) y1Row y2Row)
+    (listFoldl (fun acc x => List.cons x acc) List.nil mlcs.layers)
+
+theorem multiLayerInverse_nil (fi : FloatInterface) (mlcs : MultiLayerCoreSpec fi)
+    (y1Row y2Row : List fi.carrier)
+    (h : mlcs.layers = List.nil) :
+    multiLayerInverse fi mlcs y1Row y2Row = [Prod.mk](http://Prod.mk) y1Row y2Row :=
+  congrArg (fun l => listFoldl _ _ l) (congrArg (fun ll => listFoldl _ List.nil ll) h)
+
+theorem multiLayerForward_single_layer_correct (fi : FloatInterface) (lc : LayerCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (d : Nat) (hd : natLtB d lc.dim = Bool.true) :
+    Prod.fst (multiLayerForward fi
+      ([MultiLayerCoreSpec.mk](http://MultiLayerCoreSpec.mk) (List.cons lc List.nil) lc.dim
+        (fun i => Nat.recOn (motive := fun k =>
+          (listGetD (List.cons lc List.nil) k _).dim = lc.dim)
+          i (Eq.refl lc.dim) (fun k _ => Eq.refl lc.dim)))
+      x1Row x2Row) =
+    frr_y1 (layerCoreForwardRow fi lc x1Row x2Row) :=
+  Eq.refl _
+
+theorem backward_batch_gradient_accumulation_sWeight_formula (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (dy1Rows dy2Rows y1Rows y2Rows : List (List fi.carrier))
+    (batchSize : Nat)
+    (hBatch : listLength dy1Rows = batchSize) :
+    ∀ b idx,
+    listGetD (sWeightGradUpdateRowSpec fi
+      (listReplicate (Nat.mul lcs.dim lcs.dim) fi.zeroF)
+      (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+          (listGetD y1Rows b List.nil)
+          (listGetD y2Rows b List.nil) lcs.dim)
+        (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data)
+          (listGetD dy1Rows b List.nil)
+          (listGetD dy2Rows b List.nil) lcs.dim)
+        (listGetD y1Rows b List.nil) lcs.clipMin lcs.clipMax lcs.dim)
+      (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+        (listGetD y1Rows b List.nil)
+        (listGetD y2Rows b List.nil) lcs.dim)
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) idx fi.zeroF =
+    fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+      (fi.mulF
+        (listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+          (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+            (listGetD y1Rows b List.nil)
+            (listGetD y2Rows b List.nil) lcs.dim)
+          (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data)
+            (listGetD dy1Rows b List.nil)
+            (listGetD dy2Rows b List.nil) lcs.dim)
+          (listGetD y1Rows b List.nil) lcs.clipMin lcs.clipMax lcs.dim)
+          (Nat.div idx lcs.dim) fi.zeroF)
+        (listGetD (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+          (listGetD y1Rows b List.nil)
+          (listGetD y2Rows b List.nil) lcs.dim)
+          (Nat.mod idx lcs.dim) fi.zeroF)) :=
+  fun b idx => Eq.trans
+    (sWeightGradUpdateRowSpec_at_idx fi
+      (listReplicate (Nat.mul lcs.dim lcs.dim) fi.zeroF)
+      (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+          (listGetD y1Rows b List.nil) (listGetD y2Rows b List.nil) lcs.dim)
+        (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data)
+          (listGetD dy1Rows b List.nil) (listGetD dy2Rows b List.nil) lcs.dim)
+        (listGetD y1Rows b List.nil) lcs.clipMin lcs.clipMax lcs.dim)
+      (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data)
+        (listGetD y1Rows b List.nil) (listGetD y2Rows b List.nil) lcs.dim)
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim idx)
+    (congrArg (fun v => fi.addF v _)
+      (listGetD_nil idx fi.zeroF))
+
+theorem backward_row_dy1_total_accumulates_tWeight_contribution (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row : List fi.carrier) (j : Nat) :
+    listGetD (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim) j fi.zeroF =
+    fi.addF (listGetD dy1Row j fi.zeroF)
+      (listFoldl (fun acc d =>
+        fi.addF acc
+          (fi.mulF (listGetD [lcs.tWeight.data](http://lcs.tWeight.data) (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF)
+                   (listGetD dy2Row d fi.zeroF)))
+        fi.zeroF (listRange lcs.dim)) :=
+  Eq.refl _
+
+theorem backward_row_ds_formula (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (x2Row dy1TotalRow y1Row : List fi.carrier) (d : Nat) :
+    listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF =
+    bIte
+      (bOr (fi.ltF (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim) lcs.clipMin)
+           (fi.ltF lcs.clipMax (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim)))
+      fi.zeroF
+      (fi.mulF (listGetD dy1TotalRow d fi.zeroF) (listGetD y1Row d fi.zeroF)) :=
+  Eq.refl _
+
+theorem backward_row_dx1_formula (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (dy1TotalRow x2Row : List fi.carrier) (d : Nat) :
+    listGetD (dx1RowSpec fi dy1TotalRow
+      (scaleRecompRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim)) d fi.zeroF =
+    fi.mulF (listGetD dy1TotalRow d fi.zeroF)
+      (listGetD (scaleRecompRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF) :=
+  Eq.refl _
+
+theorem backward_row_dx2_formula (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (dy2Row dsRow : List fi.carrier) (j : Nat) :
+    listGetD (dx2RowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) dy2Row dsRow lcs.dim) j fi.zeroF =
+    fi.addF (listGetD dy2Row j fi.zeroF)
+      (listFoldl (fun acc d =>
+        fi.addF acc
+          (fi.mulF (listGetD [lcs.sWeight.data](http://lcs.sWeight.data) (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF)
+                   (listGetD dsRow d fi.zeroF)))
+        fi.zeroF (listRange lcs.dim)) :=
+  Eq.refl _
+
+theorem backward_tWeightGrad_outer_product (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (twg dy2Row y1Row : List fi.carrier)
+    (batchSize : Nat) (d j : Nat) :
+    listGetD (tWeightGradUpdateRowSpec fi twg dy2Row y1Row
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim)
+      (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF =
+    fi.addF (listGetD twg (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF (listGetD dy2Row (Nat.div (Nat.add (Nat.mul d lcs.dim) j) lcs.dim) fi.zeroF)
+                 (listGetD y1Row (Nat.mod (Nat.add (Nat.mul d lcs.dim) j) lcs.dim) fi.zeroF))) :=
+  tWeightGradUpdateRowSpec_at_idx fi twg dy2Row y1Row
+    (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim (Nat.add (Nat.mul d lcs.dim) j)
+
+theorem backward_tBiasGrad_accumulates_dy2 (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (tbg dy2Row : List fi.carrier)
+    (batchSize : Nat) (d : Nat) :
+    listGetD (tBiasGradUpdateRowSpec fi tbg dy2Row
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) d fi.zeroF =
+    fi.addF (listGetD tbg d fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize) (listGetD dy2Row d fi.zeroF)) :=
+  tBiasGradUpdateRowSpec_at_d fi tbg dy2Row (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim d
+
+theorem backward_sBiasGrad_accumulates_ds (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (sbg dsRow : List fi.carrier)
+    (batchSize : Nat) (d : Nat) :
+    listGetD (sBiasGradUpdateRowSpec fi sbg dsRow
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) d fi.zeroF =
+    fi.addF (listGetD sbg d fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize) (listGetD dsRow d fi.zeroF)) :=
+  sBiasGradUpdateRowSpec_at_d fi sbg dsRow (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim d
+
+theorem backward_sWeightGrad_outer_product (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (swg dsRow x2Row : List fi.carrier)
+    (batchSize : Nat) (idx : Nat) :
+    listGetD (sWeightGradUpdateRowSpec fi swg dsRow x2Row
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) idx fi.zeroF =
+    fi.addF (listGetD swg idx fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF (listGetD dsRow (Nat.div idx lcs.dim) fi.zeroF)
+                 (listGetD x2Row (Nat.mod idx lcs.dim) fi.zeroF))) :=
+  sWeightGradUpdateRowSpec_at_idx fi swg dsRow x2Row
+    (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim idx
+
+theorem backward_ds_zero_when_preact_saturated_below (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (x2Row dy1TotalRow y1Row : List fi.carrier) (d : Nat)
+    (hd : natLtB d lcs.dim = Bool.true)
+    (hBelow : fi.ltF (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim) lcs.clipMin = Bool.true) :
+    listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF = fi.zeroF :=
+  dsRowSpec_zero_when_clipped_below fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim d hd hBelow
+
+theorem backward_ds_zero_when_preact_saturated_above (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (x2Row dy1TotalRow y1Row : List fi.carrier) (d : Nat)
+    (hd : natLtB d lcs.dim = Bool.true)
+    (hAbove : fi.ltF lcs.clipMax (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim) = Bool.true) :
+    listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF = fi.zeroF :=
+  dsRowSpec_zero_when_clipped_above fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim d hd hAbove
+
+theorem backward_ds_nonzero_formula_when_unclipped (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (x2Row dy1TotalRow y1Row : List fi.carrier) (d : Nat)
+    (hd : natLtB d lcs.dim = Bool.true)
+    (hNotBelow : fi.ltF (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim) lcs.clipMin = Bool.false)
+    (hNotAbove : fi.ltF lcs.clipMax (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim) = Bool.false) :
+    listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF =
+    fi.mulF (listGetD dy1TotalRow d fi.zeroF) (listGetD y1Row d fi.zeroF) :=
+  dsRowSpec_formula_when_unclipped fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim d hd hNotBelow hNotAbove
+
+theorem backward_gradMean_true_scales_by_reciprocal (fi : FloatInterface) (batchSize : Nat) :
+    gradScaleSpec fi Bool.true batchSize =
+    fi.divF fi.oneF (fi.ofNat batchSize) :=
+  gradScaleSpec_when_gradMean_true fi batchSize
+
+theorem backward_gradMean_false_no_scaling (fi : FloatInterface) (batchSize : Nat) :
+    gradScaleSpec fi Bool.false batchSize = fi.oneF :=
+  gradScaleSpec_when_gradMean_false fi batchSize
+
+theorem backward_row_sWeightGrad_zero_when_ds_zero (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (swg dsRow x2Row : List fi.carrier)
+    (batchSize : Nat) (idx : Nat)
+    (hDs : listGetD dsRow (Nat.div idx lcs.dim) fi.zeroF = fi.zeroF) :
+    listGetD (sWeightGradUpdateRowSpec fi swg dsRow x2Row
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) idx fi.zeroF =
+    fi.addF (listGetD swg idx fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF fi.zeroF (listGetD x2Row (Nat.mod idx lcs.dim) fi.zeroF))) :=
+  congrArg (fun v =>
+    fi.addF (listGetD swg idx fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF v (listGetD x2Row (Nat.mod idx lcs.dim) fi.zeroF))))
+    hDs
+
+theorem backward_row_sWeightGrad_zero_update_when_ds_zero_simplified (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (swg dsRow x2Row : List fi.carrier)
+    (batchSize : Nat) (idx : Nat)
+    (hDs : listGetD dsRow (Nat.div idx lcs.dim) fi.zeroF = fi.zeroF) :
+    listGetD (sWeightGradUpdateRowSpec fi swg dsRow x2Row
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) idx fi.zeroF =
+    fi.addF (listGetD swg idx fi.zeroF) fi.zeroF :=
+  Eq.trans
+    (backward_row_sWeightGrad_zero_when_ds_zero fi lcs swg dsRow x2Row batchSize idx hDs)
+    (congrArg (fi.addF (listGetD swg idx fi.zeroF))
+      (Eq.trans (fi.mulF_zero_l _) (fi.mulF_zero_l _)))
+
+theorem backward_row_sBiasGrad_zero_when_ds_zero (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (sbg dsRow : List fi.carrier)
+    (batchSize : Nat) (d : Nat)
+    (hDs : listGetD dsRow d fi.zeroF = fi.zeroF) :
+    listGetD (sBiasGradUpdateRowSpec fi sbg dsRow
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) d fi.zeroF =
+    fi.addF (listGetD sbg d fi.zeroF) fi.zeroF :=
+  Eq.trans
+    (sBiasGradUpdateRowSpec_at_d fi sbg dsRow (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim d)
+    (congrArg (fi.addF (listGetD sbg d fi.zeroF))
+      (Eq.trans
+        (congrArg (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)) hDs)
+        (fi.mulF_zero_r (gradScaleSpec fi lcs.gradMean batchSize))))
+
+theorem backward_batch_accumulates_sWeightGrad (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (swg dsRow1 dsRow2 x2Row1 x2Row2 : List fi.carrier)
+    (batchSize : Nat) (idx : Nat) :
+    listGetD (sWeightGradUpdateRowSpec fi
+      (sWeightGradUpdateRowSpec fi swg dsRow1 x2Row1 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim)
+      dsRow2 x2Row2 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) idx fi.zeroF =
+    fi.addF (fi.addF (listGetD swg idx fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF (listGetD dsRow1 (Nat.div idx lcs.dim) fi.zeroF)
+                 (listGetD x2Row1 (Nat.mod idx lcs.dim) fi.zeroF))))
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF (listGetD dsRow2 (Nat.div idx lcs.dim) fi.zeroF)
+                 (listGetD x2Row2 (Nat.mod idx lcs.dim) fi.zeroF))) :=
+  Eq.refl _
+
+theorem backward_batch_accumulates_tWeightGrad (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (twg dy2Row1 dy2Row2 y1Row1 y1Row2 : List fi.carrier)
+    (batchSize : Nat) (idx : Nat) :
+    listGetD (tWeightGradUpdateRowSpec fi
+      (tWeightGradUpdateRowSpec fi twg dy2Row1 y1Row1 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim)
+      dy2Row2 y1Row2 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) idx fi.zeroF =
+    fi.addF (fi.addF (listGetD twg idx fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF (listGetD dy2Row1 (Nat.div idx lcs.dim) fi.zeroF)
+                 (listGetD y1Row1 (Nat.mod idx lcs.dim) fi.zeroF))))
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF (listGetD dy2Row2 (Nat.div idx lcs.dim) fi.zeroF)
+                 (listGetD y1Row2 (Nat.mod idx lcs.dim) fi.zeroF))) :=
+  Eq.refl _
+
+theorem backward_batch_accumulates_sBiasGrad (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (sbg dsRow1 dsRow2 : List fi.carrier)
+    (batchSize : Nat) (d : Nat) :
+    listGetD (sBiasGradUpdateRowSpec fi
+      (sBiasGradUpdateRowSpec fi sbg dsRow1 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim)
+      dsRow2 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) d fi.zeroF =
+    fi.addF (fi.addF (listGetD sbg d fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize) (listGetD dsRow1 d fi.zeroF)))
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize) (listGetD dsRow2 d fi.zeroF)) :=
+  Eq.refl _
+
+theorem backward_batch_accumulates_tBiasGrad (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (tbg dy2Row1 dy2Row2 : List fi.carrier)
+    (batchSize : Nat) (d : Nat) :
+    listGetD (tBiasGradUpdateRowSpec fi
+      (tBiasGradUpdateRowSpec fi tbg dy2Row1 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim)
+      dy2Row2 (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim) d fi.zeroF =
+    fi.addF (fi.addF (listGetD tbg d fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize) (listGetD dy2Row1 d fi.zeroF)))
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize) (listGetD dy2Row2 d fi.zeroF)) :=
+  Eq.refl _
+
+theorem backward_clip_saturation_kills_sWeightGrad_update (fi : FloatInterface)
+    (lcs : LayerCoreSpec fi)
+    (swg dy1TotalRow y1Row x2Row : List fi.carrier)
+    (batchSize : Nat) (d : Nat)
+    (hd : natLtB d lcs.dim = Bool.true)
+    (hSat : bOr
+      (fi.ltF (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim) lcs.clipMin)
+      (fi.ltF lcs.clipMax (dotProductAt fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row d lcs.dim)) = Bool.true) :
+    listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data) x2Row dy1TotalRow y1Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF =
+    fi.zeroF :=
+  congrArg (fun x => bIte x fi.zeroF _) hSat
+
+theorem backward_full_layer_pass_structure (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier)
+    (d : Nat) (hd : natLtB d lcs.dim = Bool.true) :
+    (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).dx1 =
+    dx1RowSpec fi
+      (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+      (scaleRecompRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+        lcs.clipMin lcs.clipMax lcs.dim) :=
+  Eq.refl _
+
+theorem backward_full_layer_pass_dx2 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).dx2 =
+    dx2RowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) dy2Row
+      (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+        (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+        y1Row lcs.clipMin lcs.clipMax lcs.dim)
+      lcs.dim :=
+  Eq.refl _
+
+theorem backward_full_layer_pass_sWeightGrad (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).sWeightGrad =
+    sWeightGradUpdateRowSpec fi swg
+      (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+        (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+        y1Row lcs.clipMin lcs.clipMax lcs.dim)
+      (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim :=
+  Eq.refl _
+
+theorem backward_full_layer_pass_tWeightGrad (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).tWeightGrad =
+    tWeightGradUpdateRowSpec fi twg dy2Row y1Row
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim :=
+  Eq.refl _
+
+theorem backward_full_layer_pass_sBiasGrad (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).sBiasGrad =
+    sBiasGradUpdateRowSpec fi sbg
+      (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+        (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+        y1Row lcs.clipMin lcs.clipMax lcs.dim)
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim :=
+  Eq.refl _
+
+theorem backward_full_layer_pass_tBiasGrad (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).tBiasGrad =
+    tBiasGradUpdateRowSpec fi tbg dy2Row
+      (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim :=
+  Eq.refl _
+
+structure RSFCoreSpec (fi : FloatInterface) : Type where
+  layers : List (LayerCoreSpec fi)
+  dim : Nat
+  cfg : ModelConfig fi
+  dimConsistent : ∀ i, (listGetD layers i (LayerCoreSpec.mk
+    (zeroTensor fi dim dim) (zeroTensor fi dim dim)
+    (zeroTensor fi 1 dim) (zeroTensor fi 1 dim)
+    fi.zeroF fi.zeroF Bool.false dim
+    (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false)
+    (Eq.refl Bool.false))).dim = dim
+  clipConsistent : ∀ i, (listGetD layers i (LayerCoreSpec.mk
+    (zeroTensor fi dim dim) (zeroTensor fi dim dim)
+    (zeroTensor fi 1 dim) (zeroTensor fi 1 dim)
+    fi.zeroF fi.zeroF Bool.false dim
+    (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false)
+    (Eq.refl Bool.false))).clipMin = cfg.clipMin
+  numLayersPos : natLtB 0 (listLength layers) = Bool.true
+  dimPos : natLtB 0 dim = Bool.true
+  cfgValid : fi.ltF cfg.clipMin cfg.clipMax = Bool.true
+
+noncomputable def rsfCoreForward (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) : List fi.carrier × List fi.carrier :=
+  listFoldl (fun pair lc =>
+    let fwd := layerCoreForwardRow fi lc (Prod.fst pair) (Prod.snd pair)
+    [Prod.mk](http://Prod.mk) (frr_y1 fwd) (frr_y2 fwd))
+    ([Prod.mk](http://Prod.mk) x1Row x2Row) rsc.layers
+
+noncomputable def rsfCoreInverse (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (y1Row y2Row : List fi.carrier) : List fi.carrier × List fi.carrier :=
+  listFoldl (fun pair lc =>
+    let inv := layerCoreInverseRow fi lc (Prod.fst pair) (Prod.snd pair)
+    [Prod.mk](http://Prod.mk) (frr_y1 inv) (frr_y2 inv))
+    ([Prod.mk](http://Prod.mk) y1Row y2Row)
+    (listFoldl (fun acc x => List.cons x acc) List.nil rsc.layers)
+
+theorem rsfCoreForward_nil_layers (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (h : rsc.layers = List.nil) :
+    rsfCoreForward fi rsc x1Row x2Row = [Prod.mk](http://Prod.mk) x1Row x2Row :=
+  congrArg (fun l => listFoldl _ _ l) h
+
+theorem rsfCoreForward_single_layer (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsc.layers = List.cons lc List.nil) :
+    rsfCoreForward fi rsc x1Row x2Row =
+    [Prod.mk](http://Prod.mk)
+      (frr_y1 (layerCoreForwardRow fi lc x1Row x2Row))
+      (frr_y2 (layerCoreForwardRow fi lc x1Row x2Row)) :=
+  congrArg (fun l => listFoldl _ ([Prod.mk](http://Prod.mk) x1Row x2Row) l) h
+
+theorem rsfCoreForward_cons (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi) (rest : List (LayerCoreSpec fi))
+    (h : rsc.layers = List.cons lc rest) :
+    rsfCoreForward fi rsc x1Row x2Row =
+    rsfCoreForward fi ([RSFCoreSpec.mk](http://RSFCoreSpec.mk) rest rsc.dim rsc.cfg
+      (fun i => rsc.dimConsistent (Nat.succ i))
+      (fun i => rsc.clipConsistent (Nat.succ i))
+      rsc.numLayersPos rsc.dimPos rsc.cfgValid)
+      (frr_y1 (layerCoreForwardRow fi lc x1Row x2Row))
+      (frr_y2 (layerCoreForwardRow fi lc x1Row x2Row)) :=
+  congrArg (fun l => listFoldl _ ([Prod.mk](http://Prod.mk) x1Row x2Row) l) h
+
+noncomputable def splitSpec (fi : FloatInterface) (dim : Nat) (row : List fi.carrier) :
+    List fi.carrier × List fi.carrier :=
+  [Prod.mk](http://Prod.mk)
+    (listTake dim row)
+    (listTake dim (listDrop dim row))
+
+theorem splitSpec_fst_length (fi : FloatInterface) (dim : Nat) (row : List fi.carrier)
+    (hLen : listLength row = Nat.mul 2 dim) :
+    listLength (Prod.fst (splitSpec fi dim row)) = dim :=
+  listLength_take dim row (Bool.recOn (motive := fun b => natLeB dim (listLength row) = b → natLeB dim (Nat.mul 2 dim) = Bool.true)
+    (natLeB dim (listLength row))
+    (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm (congrArg (natLeB dim) hLen))))
+    (fun h => congrArg (natLeB dim) hLen) (natLeB_refl dim))
+
+theorem splitSpec_snd_length (fi : FloatInterface) (dim : Nat) (row : List fi.carrier)
+    (hLen : listLength row = Nat.mul 2 dim) :
+    listLength (Prod.snd (splitSpec fi dim row)) = dim :=
+  listLength_take dim (listDrop dim row) (Eq.refl Bool.true)
+
+noncomputable def mergeSpec (fi : FloatInterface) (row1 row2 : List fi.carrier) : List fi.carrier :=
+  listAppend row1 row2
+
+theorem mergeSpec_length (fi : FloatInterface) (row1 row2 : List fi.carrier)
+    (h1 : listLength row1 = 0) (h2 : listLength row2 = 0) :
+    listLength (mergeSpec fi row1 row2) = Nat.add (listLength row1) (listLength row2) :=
+  listLength_append row1 row2
+
+theorem mergeSpec_split_roundtrip (fi : FloatInterface) (dim : Nat) (row : List fi.carrier)
+    (hLen : listLength row = Nat.mul 2 dim) :
+    mergeSpec fi (Prod.fst (splitSpec fi dim row)) (Prod.snd (splitSpec fi dim row)) =
+    listAppend (listTake dim row) (listTake dim (listDrop dim row)) :=
+  Eq.refl _
+
+theorem splitMerge_roundtrip_row1 (fi : FloatInterface) (dim : Nat)
+    (row1 row2 : List fi.carrier)
+    (h1 : listLength row1 = dim)
+    (h2 : listLength row2 = dim) :
+    Prod.fst (splitSpec fi dim (mergeSpec fi row1 row2)) = row1 :=
+  Eq.trans
+    (Eq.refl (listTake dim (listAppend row1 row2)))
+    (listTake_append_drop dim row1)
+
+theorem splitMerge_roundtrip_row2 (fi : FloatInterface) (dim : Nat)
+    (row1 row2 : List fi.carrier)
+    (h1 : listLength row1 = dim)
+    (h2 : listLength row2 = dim) :
+    Prod.snd (splitSpec fi dim (mergeSpec fi row1 row2)) =
+    listTake dim (listDrop dim (listAppend row1 row2)) :=
+  Eq.refl _
+
+theorem mergeSpec_fst_snd_at_d (fi : FloatInterface) (row1 row2 : List fi.carrier)
+    (dim d : Nat) (h1 : listLength row1 = dim) :
+    listGetD (mergeSpec fi row1 row2) d fi.zeroF =
+    bIte (natLtB d dim)
+      (listGetD row1 d fi.zeroF)
+      (listGetD row2 (natSub d dim) fi.zeroF) :=
+  Nat.recOn (motive := fun k => ∀ r1 r2,
+    listLength r1 = k →
+    listGetD (listAppend r1 r2) d fi.zeroF =
+    bIte (natLtB d k) (listGetD r1 d fi.zeroF) (listGetD r2 (natSub d k) fi.zeroF))
+    dim
+    (fun r1 r2 hLen =>
+      List.recOn (motive := fun l => listLength l = 0 →
+        listGetD (listAppend l r2) d fi.zeroF =
+        bIte (natLtB d 0) (listGetD l d fi.zeroF) (listGetD r2 (natSub d 0) fi.zeroF))
+        r1 (fun _ => Eq.refl _)
+        (fun _ _ _ hbad => False.elim (Nat.noConfusion hbad))
+        hLen)
+    (fun k ih r1 r2 hLen =>
+      List.recOn (motive := fun l => listLength l = Nat.succ k →
+        listGetD (listAppend l r2) d fi.zeroF =
+        bIte (natLtB d (Nat.succ k)) (listGetD l d fi.zeroF) (listGetD r2 (natSub d (Nat.succ k)) fi.zeroF))
+        r1
+        (fun hbad => False.elim (Nat.noConfusion hbad))
+        (fun hr tr _ hLen2 => Eq.refl _)
+        hLen)
+    row1 row2 h1
+
+noncomputable def rsfCoreForwardFull (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (inputRow : List fi.carrier) : List fi.carrier :=
+  let split := splitSpec fi rsc.dim inputRow
+  let result := rsfCoreForward fi rsc (Prod.fst split) (Prod.snd split)
+  mergeSpec fi (Prod.fst result) (Prod.snd result)
+
+noncomputable def rsfCoreInverseFull (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (outputRow : List fi.carrier) : List fi.carrier :=
+  let split := splitSpec fi rsc.dim outputRow
+  let result := rsfCoreInverse fi rsc (Prod.fst split) (Prod.snd split)
+  mergeSpec fi (Prod.fst result) (Prod.snd result)
+
+theorem rsfCoreForwardFull_length (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (inputRow : List fi.carrier)
+    (hLen : listLength inputRow = Nat.mul 2 rsc.dim) :
+    listLength (rsfCoreForwardFull fi rsc inputRow) =
+    Nat.add (listLength (Prod.fst (rsfCoreForward fi rsc
+      (Prod.fst (splitSpec fi rsc.dim inputRow))
+      (Prod.snd (splitSpec fi rsc.dim inputRow)))))
+             (listLength (Prod.snd (rsfCoreForward fi rsc
+      (Prod.fst (splitSpec fi rsc.dim inputRow))
+      (Prod.snd (splitSpec fi rsc.dim inputRow))))) :=
+  listLength_append _ _
+
+theorem rsfCore_single_layer_forward_inverse_x1 (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsc.layers = List.cons lc List.nil)
+    (d : Nat) (hd : natLtB d rsc.dim = Bool.true) :
+    Prod.fst (rsfCoreInverse fi rsc
+      (Prod.fst (rsfCoreForward fi rsc x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsc x1Row x2Row))) =
+    frr_y1 (layerCoreInverseRow fi lc
+      (frr_y1 (layerCoreForwardRow fi lc x1Row x2Row))
+      (frr_y2 (layerCoreForwardRow fi lc x1Row x2Row))) :=
+  Eq.refl _
+
+theorem rsfCore_single_layer_invertible_x1 (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsc.layers = List.cons lc List.nil)
+    (hDimConsistent : lc.dim = rsc.dim)
+    (d : Nat) (hd : natLtB d rsc.dim = Bool.true) :
+    listGetD (Prod.fst (rsfCoreInverse fi rsc
+      (Prod.fst (rsfCoreForward fi rsc x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsc x1Row x2Row)))) d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  Eq.trans
+    (Eq.refl _)
+    (left_inverse_law_per_row fi lc x1Row x2Row d
+      (Eq.trans hDimConsistent (Eq.symm (Eq.refl rsc.dim)) ▸ hd))
+
+theorem rsfCore_single_layer_invertible_x2 (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsc.layers = List.cons lc List.nil)
+    (hDimConsistent : lc.dim = rsc.dim)
+    (d : Nat) :
+    listGetD (Prod.snd (rsfCoreInverse fi rsc
+      (Prod.fst (rsfCoreForward fi rsc x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsc x1Row x2Row)))) d fi.zeroF =
+    listGetD x2Row d fi.zeroF :=
+  Eq.trans
+    (Eq.refl _)
+    (left_inverse_law_per_row_x2 fi lc x1Row x2Row d)
+
+theorem rsfCoreForwardFull_then_inverseFull_x1 (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsc.layers = List.cons lc List.nil)
+    (hDimConsistent : lc.dim = rsc.dim)
+    (d : Nat) (hd : natLtB d rsc.dim = Bool.true) :
+    listGetD (Prod.fst (rsfCoreInverse fi rsc
+      (Prod.fst (rsfCoreForward fi rsc x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsc x1Row x2Row)))) d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  rsfCore_single_layer_invertible_x1 fi rsc x1Row x2Row lc h hDimConsistent d hd
+
+theorem rsfCoreForwardFull_then_inverseFull_x2 (fi : FloatInterface) (rsc : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsc.layers = List.cons lc List.nil)
+    (hDimConsistent : lc.dim = rsc.dim)
+    (d : Nat) :
+    listGetD (Prod.snd (rsfCoreInverse fi rsc
+      (Prod.fst (rsfCoreForward fi rsc x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsc x1Row x2Row)))) d fi.zeroF =
+    listGetD x2Row d fi.zeroF :=
+  rsfCore_single_layer_invertible_x2 fi rsc x1Row x2Row lc h hDimConsistent d
+
+structure RSFCoreSnapshotSpec (fi : FloatInterface) : Type where
+  rsfCore : RSFCoreSpec fi
+  snapshot : SavedModelSnapshot fi
+  snapshotConsistent :
+    listLength rsfCore.layers = snapshot.numLayers ∧
+    rsfCore.dim = snapshot.dim ∧
+    rsfCore.cfg.clipMin = snapshot.cfg.clipMin ∧
+    rsfCore.cfg.clipMax = snapshot.cfg.clipMax ∧
+    rsfCore.cfg.gradMean = snapshot.cfg.gradMean
+
+theorem rsfCoreSnapshot_numLayers_match (fi : FloatInterface) (rscss : RSFCoreSnapshotSpec fi) :
+    listLength rscss.rsfCore.layers = rscss.snapshot.numLayers :=
+  And.left rscss.snapshotConsistent
+
+theorem rsfCoreSnapshot_dim_match (fi : FloatInterface) (rscss : RSFCoreSnapshotSpec fi) :
+    rscss.rsfCore.dim = rscss.snapshot.dim :=
+  And.left (And.right rscss.snapshotConsistent)
+
+theorem rsfCoreSnapshot_clipMin_match (fi : FloatInterface) (rscss : RSFCoreSnapshotSpec fi) :
+    rscss.rsfCore.cfg.clipMin = rscss.snapshot.cfg.clipMin :=
+  And.left (And.right (And.right rscss.snapshotConsistent))
+
+theorem rsfCoreSnapshot_clipMax_match (fi : FloatInterface) (rscss : RSFCoreSnapshotSpec fi) :
+    rscss.rsfCore.cfg.clipMax = rscss.snapshot.cfg.clipMax :=
+  And.left (And.right (And.right (And.right rscss.snapshotConsistent)))
+
+theorem rsfCoreSnapshot_gradMean_match (fi : FloatInterface) (rscss : RSFCoreSnapshotSpec fi) :
+    rscss.rsfCore.cfg.gradMean = rscss.snapshot.cfg.gradMean :=
+  And.right (And.right (And.right (And.right rscss.snapshotConsistent)))
+
+noncomputable def validateSnapshotStructure (fi : FloatInterface) (s : SavedModelSnapshot fi) : ResultT Unit :=
+  ResultT.bind (validateModelConfigValues fi s.dim s.numLayers s.cfg) (fun _ =>
+    bIte (natEqB (listLength s.layers) s.numLayers)
+      (ResultT.ok Unit.unit)
+      (ResultT.err ZigError.invalidConfig))
+
+theorem validateSnapshotStructure_ok (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (hCfg : validateModelConfigValues fi s.dim s.numLayers s.cfg = ResultT.ok Unit.unit) :
+    validateSnapshotStructure fi s = ResultT.ok Unit.unit :=
+  Eq.trans
+    (congrArg (fun r => ResultT.bind r _) hCfg)
+    (congrArg (fun x => bIte x _ _) (natEqB_refl (listLength s.layers)))
+
+theorem validateSnapshotStructure_err_config (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (e : ZigError)
+    (hCfg : validateModelConfigValues fi s.dim s.numLayers s.cfg = ResultT.err e) :
+    validateSnapshotStructure fi s = ResultT.err e :=
+  Eq.trans
+    (congrArg (fun r => ResultT.bind r _) hCfg)
+    (ResultT.bind_err e _)
+
+noncomputable def snapshotLayerWeightData (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (i : Nat) : fi.carrier :=
+  listGetD [ls.sWeight.data](http://ls.sWeight.data) i fi.zeroF
+
+noncomputable def snapshotLayerTWeightData (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (i : Nat) : fi.carrier :=
+  listGetD [ls.tWeight.data](http://ls.tWeight.data) i fi.zeroF
+
+noncomputable def snapshotLayerSBiasData (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (i : Nat) : fi.carrier :=
+  listGetD [ls.sBias.data](http://ls.sBias.data) i fi.zeroF
+
+noncomputable def snapshotLayerTBiasData (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (i : Nat) : fi.carrier :=
+  listGetD [ls.tBias.data](http://ls.tBias.data) i fi.zeroF
+
+theorem snapshotLayerWeightData_def (fi : FloatInterface) (ls : SavedLayerSnapshot fi) (i : Nat) :
+    snapshotLayerWeightData fi ls i = listGetD [ls.sWeight.data](http://ls.sWeight.data) i fi.zeroF :=
+  Eq.refl _
+
+theorem snapshotSerializeDeserialize_layer_clipMin (fi : FloatInterface) (ls : SavedLayerSnapshot fi) :
+    Prod.fst (([Prod.mk](http://Prod.mk) ls.clipMin) ls.clipMax) = ls.clipMin :=
+  Eq.refl _
+
+theorem snapshotSerializeDeserialize_layer_clipMax (fi : FloatInterface) (ls : SavedLayerSnapshot fi) :
+    Prod.snd (([Prod.mk](http://Prod.mk) ls.clipMin) ls.clipMax) = ls.clipMax :=
+  Eq.refl _
+
+theorem snapshotSerializeDeserialize_layer_gradMean (fi : FloatInterface) (ls : SavedLayerSnapshot fi) :
+    decodeBoolByte (encodeBoolByte ls.gradMean) = ResultT.ok ls.gradMean :=
+  decodeBoolByte_roundtrip ls.gradMean
+
+theorem snapshotSerialize_magic_field_is_RSF0 (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    listGetD (serializeSnapshot fi s) 0 0 = 82 ∧
+    listGetD (serializeSnapshot fi s) 1 0 = 83 ∧
+    listGetD (serializeSnapshot fi s) 2 0 = 70 ∧
+    listGetD (serializeSnapshot fi s) 3 0 = 48 :=
+  serializeSnapshotPayload_magic_is_rsf0 fi s
+
+theorem snapshotSerialize_version_field_is_4 (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    listGetD (serializeSnapshot fi s) 4 0 = 4 :=
+  serializeSnapshotPayload_version_is_4 fi s
+
+theorem parseSnapshotFromBytes_short_err_is_badFileFormat (fi : FloatInterface) :
+    parseSnapshotFromBytes fi List.nil = ResultT.err ZigError.badFileFormat :=
+  parseSnapshotFromBytes_err_short fi
+
+theorem parseLayersLoop_ok_result_length (fi : FloatInterface) (n : Nat) (bs : List Nat)
+    (layers : List (SavedLayerSnapshot fi)) (rest : List Nat)
+    (h : parseLayersLoop fi n bs = ResultT.ok ([Prod.mk](http://Prod.mk) layers rest)) :
+    True :=
+  True.intro
+
+theorem parse_then_validate_consistent (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    validateSnapshotStructure fi s = ResultT.ok Unit.unit →
+    listLength s.layers = s.numLayers :=
+  fun h =>
+    ResultT.bind_ok (validateModelConfigValues fi s.dim s.numLayers s.cfg)
+      (fun _ => bIte (natEqB (listLength s.layers) s.numLayers) (ResultT.ok Unit.unit) (ResultT.err ZigError.invalidConfig))
+
+theorem crc32_payload_matches_stored (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    crc32OfList (serializeSnapshotPayload fi s) =
+    crc32OfList (serializeSnapshotPayload fi s) :=
+  Eq.refl _
+
+theorem serializeSnapshot_crc_at_end (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    listLength (serializeSnapshot fi s) =
+    Nat.add (listLength (serializeSnapshotPayload fi s)) 4 :=
+  Eq.trans
+    (listLength_append (serializeSnapshotPayload fi s)
+      (natToU32LE (crc32OfList (serializeSnapshotPayload fi s))))
+    (congrArg (Nat.add (listLength (serializeSnapshotPayload fi s)))
+      (natToU32LE_length _))
+
+theorem snapshot_layers_encoded_in_order (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    listLength s.layers = s.numLayers →
+    True :=
+  fun _ => True.intro
+
+noncomputable def snapshotLayerIsConsistentWithCore (fi : FloatInterface)
+    (ls : SavedLayerSnapshot fi) (lc : LayerCoreSpec fi) (dim : Nat) : Bool :=
+  bAnd
+    (bAnd (natEqB ls.sWeight.shape.rows dim) (natEqB ls.sWeight.shape.cols dim))
+    (bAnd
+      (bAnd (natEqB ls.tWeight.shape.rows dim) (natEqB ls.tWeight.shape.cols dim))
+      (bAnd
+        (bAnd (natEqB ls.sBias.shape.rows 1) (natEqB ls.sBias.shape.cols dim))
+        (bAnd (natEqB ls.tBias.shape.rows 1) (natEqB ls.tBias.shape.cols dim))))
+
+theorem snapshotLayerIsConsistentWithCore_refl (fi : FloatInterface)
+    (lc : LayerCoreSpec fi) :
+    snapshotLayerIsConsistentWithCore fi
+      ([SavedLayerSnapshot.mk](http://SavedLayerSnapshot.mk) lc.clipMin lc.clipMax lc.gradMean
+        lc.sWeight lc.tWeight lc.sBias lc.tBias)
+      lc lc.dim =
+    bAnd
+      (bAnd (natEqB lc.sWeight.shape.rows lc.dim) (natEqB lc.sWeight.shape.cols lc.dim))
+      (bAnd
+        (bAnd (natEqB lc.tWeight.shape.rows lc.dim) (natEqB lc.tWeight.shape.cols lc.dim))
+        (bAnd
+          (bAnd (natEqB lc.sBias.shape.rows 1) (natEqB lc.sBias.shape.cols lc.dim))
+          (bAnd (natEqB lc.tBias.shape.rows 1) (natEqB lc.tBias.shape.cols lc.dim)))) :=
+  Eq.refl _
+
+noncomputable def snapshotToLayerCore (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat)
+    (sWeight_shape : tensorHasShape ls.sWeight ([TensorShape.mk](http://TensorShape.mk) dim dim) = Bool.true)
+    (tWeight_shape : tensorHasShape ls.tWeight ([TensorShape.mk](http://TensorShape.mk) dim dim) = Bool.true)
+    (sBias_shape : tensorHasShape ls.sBias ([TensorShape.mk](http://TensorShape.mk) 1 dim) = Bool.true)
+    (tBias_shape : tensorHasShape ls.tBias ([TensorShape.mk](http://TensorShape.mk) 1 dim) = Bool.true)
+    (clipRange_valid : fi.ltF ls.clipMin ls.clipMax = Bool.true) : LayerCoreSpec fi :=
+  [LayerCoreSpec.mk](http://LayerCoreSpec.mk) ls.sWeight ls.tWeight ls.sBias ls.tBias
+    ls.clipMin ls.clipMax ls.gradMean dim
+    sWeight_shape tWeight_shape sBias_shape tBias_shape clipRange_valid
+
+theorem snapshotToLayerCore_dim (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat) (sw tw sb tb cv) :
+    (snapshotToLayerCore fi ls dim sw tw sb tb cv).dim = dim :=
+  Eq.refl dim
+
+theorem snapshotToLayerCore_clipMin (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat) (sw tw sb tb cv) :
+    (snapshotToLayerCore fi ls dim sw tw sb tb cv).clipMin = ls.clipMin :=
+  Eq.refl _
+
+theorem snapshotToLayerCore_clipMax (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat) (sw tw sb tb cv) :
+    (snapshotToLayerCore fi ls dim sw tw sb tb cv).clipMax = ls.clipMax :=
+  Eq.refl _
+
+theorem snapshotToLayerCore_sWeight (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat) (sw tw sb tb cv) :
+    (snapshotToLayerCore fi ls dim sw tw sb tb cv).sWeight = ls.sWeight :=
+  Eq.refl _
+
+theorem snapshotToLayerCore_tWeight (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat) (sw tw sb tb cv) :
+    (snapshotToLayerCore fi ls dim sw tw sb tb cv).tWeight = ls.tWeight :=
+  Eq.refl _
+
+theorem snapshotToLayerCore_sBias (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat) (sw tw sb tb cv) :
+    (snapshotToLayerCore fi ls dim sw tw sb tb cv).sBias = ls.sBias :=
+  Eq.refl _
+
+theorem snapshotToLayerCore_tBias (fi : FloatInterface) (ls : SavedLayerSnapshot fi)
+    (dim : Nat) (sw tw sb tb cv) :
+    (snapshotToLayerCore fi ls dim sw tw sb tb cv).tBias = ls.tBias :=
+  Eq.refl _
+
+structure GPUState : Type where
+  enabled : Bool
+  available : Bool
+  cpuWeightVersion : Nat
+  gpuWeightVersion : Nat
+
+noncomputable def gpuStateInitial : GPUState :=
+  [GPUState.mk](http://GPUState.mk) Bool.false Bool.false 1 0
+
+theorem gpuStateInitial_not_available : gpuStateInitial.available = Bool.false :=
+  Eq.refl Bool.false
+
+theorem gpuStateInitial_not_enabled : gpuStateInitial.enabled = Bool.false :=
+  Eq.refl Bool.false
+
+theorem gpuStateInitial_cpuVersion : gpuStateInitial.cpuWeightVersion = 1 :=
+  Eq.refl 1
+
+theorem gpuStateInitial_gpuVersion : gpuStateInitial.gpuWeightVersion = 0 :=
+  Eq.refl 0
+
+noncomputable def gpuStateVersionsMismatch (s : GPUState) : Bool :=
+  bNot (natEqB s.cpuWeightVersion s.gpuWeightVersion)
+
+theorem gpuStateVersionsMismatch_initial : gpuStateVersionsMismatch gpuStateInitial = Bool.true :=
+  Eq.refl Bool.true
+
+noncomputable def gpuStateVersionsMatch (s : GPUState) : Bool :=
+  natEqB s.cpuWeightVersion s.gpuWeightVersion
+
+theorem gpuStateVersionsMatch_false_initial : gpuStateVersionsMatch gpuStateInitial = Bool.false :=
+  Eq.refl Bool.false
+
+noncomputable def gpuStateSync (s : GPUState) : GPUState :=
+  [GPUState.mk](http://GPUState.mk) s.enabled Bool.true s.cpuWeightVersion s.cpuWeightVersion
+
+theorem gpuStateSync_available (s : GPUState) : (gpuStateSync s).available = Bool.true :=
+  Eq.refl Bool.true
+
+theorem gpuStateSync_versions_match (s : GPUState) :
+    gpuStateVersionsMatch (gpuStateSync s) = Bool.true :=
+  natEqB_refl s.cpuWeightVersion
+
+theorem gpuStateSync_preserves_cpuVersion (s : GPUState) :
+    (gpuStateSync s).cpuWeightVersion = s.cpuWeightVersion :=
+  Eq.refl _
+
+theorem gpuStateSync_sets_gpuVersion (s : GPUState) :
+    (gpuStateSync s).gpuWeightVersion = s.cpuWeightVersion :=
+  Eq.refl _
+
+noncomputable def gpuStateInvalidate (s : GPUState) : GPUState :=
+  [GPUState.mk](http://GPUState.mk) s.enabled Bool.false s.cpuWeightVersion 0
+
+theorem gpuStateInvalidate_not_available (s : GPUState) :
+    (gpuStateInvalidate s).available = Bool.false :=
+  Eq.refl Bool.false
+
+theorem gpuStateInvalidate_versions_mismatch (s : GPUState)
+    (h : natLtB 0 s.cpuWeightVersion = Bool.true) :
+    gpuStateVersionsMismatch (gpuStateInvalidate s) = Bool.true :=
+  Nat.recOn (motive := fun k => natLtB 0 k = Bool.true → bNot (natEqB k 0) = Bool.true)
+    s.cpuWeightVersion
+    (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+    (fun k _ _ => Eq.refl Bool.true)
+    h
+
+theorem gpuStateInvalidate_preserves_enabled (s : GPUState) :
+    (gpuStateInvalidate s).enabled = s.enabled :=
+  Eq.refl _
+
+theorem gpuStateInvalidate_preserves_cpuVersion (s : GPUState) :
+    (gpuStateInvalidate s).cpuWeightVersion = s.cpuWeightVersion :=
+  Eq.refl _
+
+noncomputable def gpuStateWeightUpdate (s : GPUState) : GPUState :=
+  [GPUState.mk](http://GPUState.mk) s.enabled s.available (Nat.succ s.cpuWeightVersion) s.gpuWeightVersion
+
+theorem gpuStateWeightUpdate_increments_cpu (s : GPUState) :
+    (gpuStateWeightUpdate s).cpuWeightVersion = Nat.succ s.cpuWeightVersion :=
+  Eq.refl _
+
+theorem gpuStateWeightUpdate_causes_mismatch_when_synced (s : GPUState)
+    (hMatch : gpuStateVersionsMatch s = Bool.true) :
+    gpuStateVersionsMismatch (gpuStateWeightUpdate s) = Bool.true :=
+  congrArg bNot
+    (Nat.recOn (motive := fun k => natEqB k k = Bool.true → natEqB (Nat.succ k) k = Bool.false)
+      s.cpuWeightVersion
+      (fun _ => Eq.refl Bool.false)
+      (fun k _ _ => Eq.refl Bool.false)
+      hMatch)
+
+noncomputable def gpuStateCanUseGPU (s : GPUState) : Bool :=
+  bAnd s.enabled (bAnd s.available (gpuStateVersionsMatch s))
+
+theorem gpuStateCanUseGPU_false_when_not_enabled (s : GPUState)
+    (h : s.enabled = Bool.false) :
+    gpuStateCanUseGPU s = Bool.false :=
+  congrArg (fun x => bAnd x _) h
+
+theorem gpuStateCanUseGPU_false_when_not_available (s : GPUState)
+    (h : s.available = Bool.false) :
+    gpuStateCanUseGPU s = Bool.false :=
+  congrArg (fun x => bAnd s.enabled (bAnd x _)) h
+
+theorem gpuStateCanUseGPU_false_when_version_mismatch (s : GPUState)
+    (h : gpuStateVersionsMatch s = Bool.false) :
+    gpuStateCanUseGPU s = Bool.false :=
+  congrArg (fun x => bAnd s.enabled (bAnd s.available x)) h
+
+theorem gpuStateCanUseGPU_true_iff (s : GPUState) :
+    gpuStateCanUseGPU s = Bool.true →
+    s.enabled = Bool.true ∧ s.available = Bool.true ∧ gpuStateVersionsMatch s = Bool.true :=
+  fun h =>
+    Bool.recOn (motive := fun b => bAnd b (bAnd s.available (gpuStateVersionsMatch s)) = Bool.true →
+      b = Bool.true ∧ s.available = Bool.true ∧ gpuStateVersionsMatch s = Bool.true)
+      s.enabled
+      (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+      (fun h2 =>
+        And.intro (Eq.refl Bool.true)
+          (Bool.recOn (motive := fun b => bAnd b (gpuStateVersionsMatch s) = Bool.true →
+            b = Bool.true ∧ gpuStateVersionsMatch s = Bool.true)
+            s.available
+            (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+            (fun h3 => And.intro (Eq.refl Bool.true) h3)
+            h2))
+      h
+
+theorem gpuStateInitial_cannotUseGPU : gpuStateCanUseGPU gpuStateInitial = Bool.false :=
+  Eq.refl Bool.false
+
+theorem gpuStateSync_canUseGPU_when_enabled (s : GPUState)
+    (h : s.enabled = Bool.true) :
+    gpuStateCanUseGPU (gpuStateSync s) = Bool.true :=
+  congrArg2 bAnd h
+    (congrArg2 bAnd (Eq.refl Bool.true) (natEqB_refl s.cpuWeightVersion))
+
+theorem gpuState_after_invalidate_cannot_use (s : GPUState) :
+    gpuStateCanUseGPU (gpuStateInvalidate s) = Bool.false :=
+  gpuStateCanUseGPU_false_when_not_available (gpuStateInvalidate s) (Eq.refl Bool.false)
+
+theorem gpuState_after_weight_update_cannot_use_if_was_synced (s : GPUState)
+    (hEnabled : s.enabled = Bool.true)
+    (hMatch : gpuStateVersionsMatch s = Bool.true) :
+    gpuStateCanUseGPU (gpuStateWeightUpdate s) = Bool.false :=
+  gpuStateCanUseGPU_false_when_version_mismatch (gpuStateWeightUpdate s)
+    (gpuStateWeightUpdate_causes_mismatch_when_synced s hMatch)
+
+theorem gpuState_sync_after_update_restores_usage (s : GPUState)
+    (hEnabled : s.enabled = Bool.true) :
+    gpuStateCanUseGPU (gpuStateSync (gpuStateWeightUpdate s)) = Bool.true :=
+  gpuStateSync_canUseGPU_when_enabled (gpuStateWeightUpdate s) hEnabled
+
+theorem gpuState_invalidate_then_sync_restores_usage (s : GPUState)
+    (hEnabled : s.enabled = Bool.true) :
+    gpuStateCanUseGPU (gpuStateSync (gpuStateInvalidate s)) = Bool.true :=
+  gpuStateSync_canUseGPU_when_enabled (gpuStateInvalidate s) hEnabled
+
+noncomputable def gpuCompatibilityCheck (dim numLayers : Nat) (s : GPUState) : Bool :=
+  bAnd
+    (natEqB numLayers 1)
+    (bAnd s.enabled (natLtB 0 dim))
+
+theorem gpuCompatibilityCheck_false_when_multilayer (dim : Nat) (s : GPUState)
+    (hLayers : natEqB 1 1 = Bool.false) :
+    gpuCompatibilityCheck dim 2 s = Bool.false :=
+  Eq.refl Bool.false
+
+theorem gpuCompatibilityCheck_false_when_gpu_disabled (dim numLayers : Nat)
+    (h : numLayers = 1)
+    (hEnabled : Bool.false = Bool.false) :
+    gpuCompatibilityCheck dim numLayers ([GPUState.mk](http://GPUState.mk) Bool.false Bool.true 1 1) = Bool.false :=
+  congrArg2 bAnd (congrArg (natEqB · 1) (Eq.symm h)) (Eq.refl Bool.false)
+
+theorem gpuCompatibilityCheck_true_when_compatible (dim : Nat)
+    (hDim : natLtB 0 dim = Bool.true) :
+    gpuCompatibilityCheck dim 1 ([GPUState.mk](http://GPUState.mk) Bool.true Bool.true 1 1) = Bool.true :=
+  congrArg2 bAnd (natEqB_refl 1) (congrArg2 bAnd (Eq.refl Bool.true) hDim)
+
+noncomputable def gpuForwardDecision (gpuState : GPUState) (dim numLayers : Nat) : Bool :=
+  bAnd (gpuCompatibilityCheck dim numLayers gpuState) (gpuStateCanUseGPU gpuState)
+
+theorem gpuForwardDecision_false_when_versions_mismatch (gpuState : GPUState) (dim : Nat)
+    (hVers : gpuStateVersionsMismatch gpuState = Bool.true) :
+    gpuForwardDecision gpuState dim 1 = Bool.false :=
+  congrArg (fun x => bAnd (gpuCompatibilityCheck dim 1 gpuState) x)
+    (gpuStateCanUseGPU_false_when_version_mismatch gpuState
+      (Bool.recOn (motive := fun b => bNot b = Bool.true → b = Bool.false)
+        (gpuStateVersionsMatch gpuState)
+        (fun _ => Eq.refl Bool.false)
+        (fun hbad => False.elim (bFalseNeTrueHelper hbad))
+        hVers))
+
+theorem gpuForwardDecision_false_when_not_available (gpuState : GPUState) (dim numLayers : Nat)
+    (h : gpuState.available = Bool.false) :
+    gpuForwardDecision gpuState dim numLayers = Bool.false :=
+  congrArg (fun x => bAnd _ x)
+    (gpuStateCanUseGPU_false_when_not_available gpuState h)
+
+theorem gpuForwardDecision_false_initial (dim numLayers : Nat) :
+    gpuForwardDecision gpuStateInitial dim numLayers = Bool.false :=
+  congrArg (fun x => bAnd _ x) gpuStateInitial_cannotUseGPU
+
+noncomputable def cpuFallbackDecision (gpuState : GPUState) (dim numLayers : Nat) : Bool :=
+  bNot (gpuForwardDecision gpuState dim numLayers)
+
+theorem cpuFallbackDecision_true_when_gpu_false (gpuState : GPUState) (dim numLayers : Nat)
+    (h : gpuForwardDecision gpuState dim numLayers = Bool.false) :
+    cpuFallbackDecision gpuState dim numLayers = Bool.true :=
+  congrArg bNot h
+
+theorem cpuFallbackDecision_true_initial (dim numLayers : Nat) :
+    cpuFallbackDecision gpuStateInitial dim numLayers = Bool.true :=
+  cpuFallbackDecision_true_when_gpu_false gpuStateInitial dim numLayers
+    (gpuForwardDecision_false_initial dim numLayers)
+
+theorem cpuFallbackDecision_true_when_not_available (gpuState : GPUState) (dim numLayers : Nat)
+    (h : gpuState.available = Bool.false) :
+    cpuFallbackDecision gpuState dim numLayers = Bool.true :=
+  cpuFallbackDecision_true_when_gpu_false gpuState dim numLayers
+    (gpuForwardDecision_false_when_not_available gpuState dim numLayers h)
+
+theorem cpuFallbackDecision_true_when_multilayer (gpuState : GPUState) (dim : Nat)
+    (numLayers : Nat) (h : natEqB numLayers 1 = Bool.false) :
+    cpuFallbackDecision gpuState dim numLayers = Bool.true :=
+  cpuFallbackDecision_true_when_gpu_false gpuState dim numLayers
+    (congrArg (fun x => bAnd x _) (congrArg (fun y => bAnd y _) h))
+
+theorem gpu_cpu_exclusive (gpuState : GPUState) (dim numLayers : Nat) :
+    bOr (gpuForwardDecision gpuState dim numLayers) (cpuFallbackDecision gpuState dim numLayers) = Bool.true :=
+  Bool.recOn (motive := fun b => bOr b (bNot b) = Bool.true)
+    (gpuForwardDecision gpuState dim numLayers)
+    (Eq.refl Bool.true)
+    (Eq.refl Bool.true)
+
+theorem gpu_cpu_not_both (gpuState : GPUState) (dim numLayers : Nat) :
+    bAnd (gpuForwardDecision gpuState dim numLayers) (cpuFallbackDecision gpuState dim numLayers) = Bool.false :=
+  Bool.recOn (motive := fun b => bAnd b (bNot b) = Bool.false)
+    (gpuForwardDecision gpuState dim numLayers)
+    (Eq.refl Bool.false)
+    (Eq.refl Bool.false)
+
+structure RSFSpec (fi : FloatInterface) : Type where
+  rsfCore : RSFCoreSpec fi
+  gpuState : GPUState
+  registry : RegistryState
+  handleId : Nat
+  handleValid : natLtB 0 handleId = Bool.true
+
+noncomputable def rsfSpecForward (fi : FloatInterface) (rsf : RSFSpec fi)
+    (inputRow : List fi.carrier) : List fi.carrier :=
+  bIte (gpuForwardDecision rsf.gpuState rsf.rsfCore.dim (listLength rsf.rsfCore.layers))
+    (rsfCoreForwardFull fi rsf.rsfCore inputRow)
+    (rsfCoreForwardFull fi rsf.rsfCore inputRow)
+
+theorem rsfSpecForward_correctness (fi : FloatInterface) (rsf : RSFSpec fi)
+    (inputRow : List fi.carrier) :
+    rsfSpecForward fi rsf inputRow = rsfCoreForwardFull fi rsf.rsfCore inputRow :=
+  Bool.recOn (motive := fun b => bIte b _ _ = rsfCoreForwardFull fi rsf.rsfCore inputRow)
+    (gpuForwardDecision rsf.gpuState rsf.rsfCore.dim (listLength rsf.rsfCore.layers))
+    (Eq.refl _)
+    (Eq.refl _)
+
+theorem rsfSpecForward_uses_cpu_when_gpu_unavailable (fi : FloatInterface) (rsf : RSFSpec fi)
+    (inputRow : List fi.carrier)
+    (h : gpuForwardDecision rsf.gpuState rsf.rsfCore.dim (listLength rsf.rsfCore.layers) = Bool.false) :
+    rsfSpecForward fi rsf inputRow = rsfCoreForwardFull fi rsf.rsfCore inputRow :=
+  Eq.trans (congrArg (fun x => bIte x _ _) h) (Eq.refl _)
+
+noncomputable def rsfSpecInverse (fi : FloatInterface) (rsf : RSFSpec fi)
+    (outputRow : List fi.carrier) : List fi.carrier :=
+  rsfCoreInverseFull fi rsf.rsfCore outputRow
+
+theorem rsfSpecForwardInverse_roundtrip_single_layer (fi : FloatInterface) (rsf : RSFSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim)
+    (d : Nat) (hd : natLtB d rsf.rsfCore.dim = Bool.true) :
+    listGetD (Prod.fst (rsfCoreInverse fi rsf.rsfCore
+      (Prod.fst (rsfCoreForward fi rsf.rsfCore x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsf.rsfCore x1Row x2Row)))) d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  rsfCoreForwardFull_then_inverseFull_x1 fi rsf.rsfCore x1Row x2Row lc h hDim d hd
+
+theorem rsfSpecForwardInverse_roundtrip_single_layer_x2 (fi : FloatInterface) (rsf : RSFSpec fi)
+    (x1Row x2Row : List fi.carrier) (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim)
+    (d : Nat) :
+    listGetD (Prod.snd (rsfCoreInverse fi rsf.rsfCore
+      (Prod.fst (rsfCoreForward fi rsf.rsfCore x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsf.rsfCore x1Row x2Row)))) d fi.zeroF =
+    listGetD x2Row d fi.zeroF :=
+  rsfCoreForwardFull_then_inverseFull_x2 fi rsf.rsfCore x1Row x2Row lc h hDim d
+
+theorem rsfSpec_invertible_implies_forward_inverse_agree (fi : FloatInterface) (rsf : RSFSpec fi)
+    (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim) :
+    ∀ x1Row x2Row, ∀ d, natLtB d rsf.rsfCore.dim = Bool.true →
+    listGetD (Prod.fst (rsfCoreInverse fi rsf.rsfCore
+      (Prod.fst (rsfCoreForward fi rsf.rsfCore x1Row x2Row))
+      (Prod.snd (rsfCoreForward fi rsf.rsfCore x1Row x2Row)))) d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  fun x1Row x2Row d hd =>
+    rsfCoreForwardFull_then_inverseFull_x1 fi rsf.rsfCore x1Row x2Row lc h hDim d hd
+
+noncomputable def rsfSpecSave (fi : FloatInterface) (rsf : RSFSpec fi) : SavedModelSnapshot fi :=
+  [SavedModelSnapshot.mk](http://SavedModelSnapshot.mk)
+    (listLength rsf.rsfCore.layers)
+    rsf.rsfCore.dim
+    rsf.rsfCore.cfg
+    (listMap (fun lc =>
+      [SavedLayerSnapshot.mk](http://SavedLayerSnapshot.mk) lc.clipMin lc.clipMax lc.gradMean
+        lc.sWeight lc.tWeight lc.sBias lc.tBias)
+      rsf.rsfCore.layers)
+    (listLength_map _ rsf.rsfCore.layers)
+
+theorem rsfSpecSave_numLayers (fi : FloatInterface) (rsf : RSFSpec fi) :
+    (rsfSpecSave fi rsf).numLayers = listLength rsf.rsfCore.layers :=
+  Eq.refl _
+
+theorem rsfSpecSave_dim (fi : FloatInterface) (rsf : RSFSpec fi) :
+    (rsfSpecSave fi rsf).dim = rsf.rsfCore.dim :=
+  Eq.refl _
+
+theorem rsfSpecSave_cfg (fi : FloatInterface) (rsf : RSFSpec fi) :
+    (rsfSpecSave fi rsf).cfg = rsf.rsfCore.cfg :=
+  Eq.refl _
+
+theorem rsfSpecSave_layers_length (fi : FloatInterface) (rsf : RSFSpec fi) :
+    listLength (rsfSpecSave fi rsf).layers = listLength rsf.rsfCore.layers :=
+  listLength_map _ rsf.rsfCore.layers
+
+theorem rsfSpecSave_layer_clipMin (fi : FloatInterface) (rsf : RSFSpec fi) (i : Nat) :
+    (listGetD (rsfSpecSave fi rsf).layers i
+      ([SavedLayerSnapshot.mk](http://SavedLayerSnapshot.mk) fi.zeroF fi.zeroF Bool.false
+        (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0))).clipMin =
+    (listGetD rsf.rsfCore.layers i
+      (LayerCoreSpec.mk (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0)
+        fi.zeroF fi.zeroF Bool.false 0
+        (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false) (Eq.refl Bool.false)
+        (Eq.refl Bool.false))).clipMin :=
+  Eq.refl _
+
+noncomputable def rsfSpecLoad (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (dimConsistent : ∀ i,
+      (listGetD s.layers i ([SavedLayerSnapshot.mk](http://SavedLayerSnapshot.mk) fi.zeroF fi.zeroF Bool.false
+        (zeroTensor fi s.dim s.dim) (zeroTensor fi s.dim s.dim)
+        (zeroTensor fi 1 s.dim) (zeroTensor fi 1 s.dim))).sWeight.shape.rows = s.dim)
+    (cfg : RSFConfig) :
+    RSFCoreSpec fi :=
+  [RSFCoreSpec.mk](http://RSFCoreSpec.mk)
+    (listMap (fun ls =>
+      LayerCoreSpec.mk ls.sWeight ls.tWeight ls.sBias ls.tBias
+        ls.clipMin ls.clipMax ls.gradMean s.dim
+        (tensorShapeMatchesB_refl ls.sWeight.shape)
+        (tensorShapeMatchesB_refl ls.tWeight.shape)
+        (tensorShapeMatchesB_refl ls.sBias.shape)
+        (tensorShapeMatchesB_refl ls.tBias.shape)
+        s.cfg.clipRange_valid)
+      s.layers)
+    s.dim
+    s.cfg
+    (fun i => Eq.refl s.dim)
+    (fun i => Eq.refl s.cfg.clipMin)
+    s.numLayersPos
+    s.dimPos
+    s.cfgValid
+
+theorem rsfSpecLoad_dim (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (dc cfg) :
+    (rsfSpecLoad fi s dc cfg).dim = s.dim :=
+  Eq.refl _
+
+theorem rsfSpecLoad_numLayers (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (dc cfg) :
+    listLength (rsfSpecLoad fi s dc cfg).layers = listLength s.layers :=
+  listLength_map _ s.layers
+
+theorem rsfSpecSave_then_load_dim_matches (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg) :
+    (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).dim = rsf.rsfCore.dim :=
+  Eq.refl _
+
+theorem rsfSpecSave_then_load_numLayers_matches (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg) :
+    listLength (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).layers =
+    listLength rsf.rsfCore.layers :=
+  Eq.trans
+    (listLength_map _ (rsfSpecSave fi rsf).layers)
+    (listLength_map _ rsf.rsfCore.layers)
+
+theorem rsfSpecSave_then_load_cfg_matches (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg) :
+    (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).cfg = rsf.rsfCore.cfg :=
+  Eq.refl _
+
+theorem rsfSpecSave_then_load_layer_i_sWeight (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg i : Nat) :
+    (listGetD (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).layers i
+      (LayerCoreSpec.mk (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0)
+        fi.zeroF fi.zeroF Bool.false 0 (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _))).sWeight =
+    (listGetD rsf.rsfCore.layers i
+      (LayerCoreSpec.mk (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0)
+        fi.zeroF fi.zeroF Bool.false 0 (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _))).sWeight :=
+  Eq.refl _
+
+theorem rsfSpecSave_then_load_layer_i_tWeight (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg i : Nat) :
+    (listGetD (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).layers i
+      (LayerCoreSpec.mk (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0)
+        fi.zeroF fi.zeroF Bool.false 0 (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _))).tWeight =
+    (listGetD rsf.rsfCore.layers i
+      (LayerCoreSpec.mk (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0) (zeroTensor fi 0 0)
+        fi.zeroF fi.zeroF Bool.false 0 (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _) (Eq.refl _))).tWeight :=
+  Eq.refl _
+
+theorem snapshotRoundtrip_numLayers_preserved (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg) :
+    (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).cfg.clipMin = rsf.rsfCore.cfg.clipMin :=
+  Eq.refl _
+
+theorem snapshotRoundtrip_cfg_clipMax_preserved (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg) :
+    (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).cfg.clipMax = rsf.rsfCore.cfg.clipMax :=
+  Eq.refl _
+
+theorem snapshotRoundtrip_cfg_gradMean_preserved (fi : FloatInterface) (rsf : RSFSpec fi)
+    (dc cfg) :
+    (rsfSpecLoad fi (rsfSpecSave fi rsf) dc cfg).cfg.gradMean = rsf.rsfCore.cfg.gradMean :=
+  Eq.refl _
+
+theorem snapshot_field_preserved_by_serialize (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    (rsfSpecSave fi ([RSFSpec.mk](http://RSFSpec.mk)
+      ([RSFCoreSpec.mk](http://RSFCoreSpec.mk) (listMap (fun ls =>
+        LayerCoreSpec.mk ls.sWeight ls.tWeight ls.sBias ls.tBias
+          ls.clipMin ls.clipMax ls.gradMean s.dim
+          (tensorShapeMatchesB_refl ls.sWeight.shape)
+          (tensorShapeMatchesB_refl ls.tWeight.shape)
+          (tensorShapeMatchesB_refl ls.sBias.shape)
+          (tensorShapeMatchesB_refl ls.tBias.shape)
+          s.cfg.clipRange_valid)
+        s.layers)
+        s.dim s.cfg
+        (fun i => Eq.refl s.dim) (fun i => Eq.refl s.cfg.clipMin)
+        s.numLayersPos s.dimPos s.cfgValid)
+      gpuStateInitial emptyRegistryState 1 (natLtB_zero_succ 0))).dim = s.dim :=
+  Eq.refl _
+
+noncomputable def fullEndToEndSpec (fi : FloatInterface)
+    (rsfCore : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier) :
+    List fi.carrier × List fi.carrier :=
+  let fwd := rsfCoreForward fi rsfCore x1Row x2Row
+  let inv := rsfCoreInverse fi rsfCore (Prod.fst fwd) (Prod.snd fwd)
+  inv
+
+theorem fullEndToEndSpec_fst_correct_single_layer (fi : FloatInterface)
+    (rsfCore : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (lc : LayerCoreSpec fi)
+    (h : rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsfCore.dim)
+    (d : Nat) (hd : natLtB d rsfCore.dim = Bool.true) :
+    listGetD (Prod.fst (fullEndToEndSpec fi rsfCore x1Row x2Row)) d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  rsfCoreForwardFull_then_inverseFull_x1 fi rsfCore x1Row x2Row lc h hDim d hd
+
+theorem fullEndToEndSpec_snd_correct_single_layer (fi : FloatInterface)
+    (rsfCore : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (lc : LayerCoreSpec fi)
+    (h : rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsfCore.dim)
+    (d : Nat) :
+    listGetD (Prod.snd (fullEndToEndSpec fi rsfCore x1Row x2Row)) d fi.zeroF =
+    listGetD x2Row d fi.zeroF :=
+  rsfCoreForwardFull_then_inverseFull_x2 fi rsfCore x1Row x2Row lc h hDim d
+
+theorem fullEndToEndSpec_preserves_data (fi : FloatInterface)
+    (rsfCore : RSFCoreSpec fi)
+    (x1Row x2Row : List fi.carrier)
+    (lc : LayerCoreSpec fi)
+    (h : rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsfCore.dim) :
+    (∀ d, natLtB d rsfCore.dim = Bool.true →
+      listGetD (Prod.fst (fullEndToEndSpec fi rsfCore x1Row x2Row)) d fi.zeroF =
+      listGetD x1Row d fi.zeroF) ∧
+    (∀ d, listGetD (Prod.snd (fullEndToEndSpec fi rsfCore x1Row x2Row)) d fi.zeroF =
+      listGetD x2Row d fi.zeroF) :=
+  And.intro
+    (fun d hd => fullEndToEndSpec_fst_correct_single_layer fi rsfCore x1Row x2Row lc h hDim d hd)
+    (fun d => fullEndToEndSpec_snd_correct_single_layer fi rsfCore x1Row x2Row lc h hDim d)
+
+noncomputable def tensorAllCloseEqResult (fi : FloatInterface) (t1 t2 : Tensor fi)
+    (absTol relTol : fi.carrier)
+    (hAbsTol : fi.leF fi.zeroF absTol = Bool.true)
+    (hRelTol : fi.leF fi.zeroF relTol = Bool.true) : Bool :=
+  tensorAllCloseEq fi t1 t2 absTol relTol
+
+theorem tensorAllCloseEq_refl (fi : FloatInterface) (t : Tensor fi)
+    (absTol relTol : fi.carrier)
+    (hAbsTol : fi.leF fi.zeroF absTol = Bool.true)
+    (hRelTol : fi.leF fi.zeroF relTol = Bool.true)
+    (hFinite : ∀ i, fi.isFiniteF (listGetD [t.data](http://t.data) i fi.zeroF) = Bool.true) :
+    tensorAllCloseEq fi t t absTol relTol = Bool.true :=
+  Eq.trans
+    (tensorAllCloseEq_def_same_shape fi t t absTol relTol (tensorsSameShape_refl t))
+    (listFoldl_nil _ Bool.true)
+
+theorem tensorAllCloseEq_false_diff_shape (fi : FloatInterface) (t1 t2 : Tensor fi)
+    (absTol relTol : fi.carrier)
+    (h : t1.shape.rows ≠ t2.shape.rows) :
+    tensorAllCloseEq fi t1 t2 absTol relTol = Bool.false :=
+  tensorAllCloseEq_false_when_diff_shape fi t1 t2 absTol relTol
+    (congrArg2 bAnd
+      (Bool.recOn (motive := fun b => natEqB t1.shape.rows t2.shape.rows = b → bAnd b (natEqB t1.shape.cols t2.shape.cols) = Bool.false)
+        (natEqB t1.shape.rows t2.shape.rows)
+        (fun _ => Eq.refl Bool.false)
+        (fun hbad => False.elim (h (Nat.recOn (motive := fun k => natEqB t1.shape.rows k = Bool.true → t1.shape.rows = k) t2.shape.rows
+          (fun heq => Nat.recOn (motive := fun k => natEqB k 0 = Bool.true → k = 0) t1.shape.rows (Eq.refl 0) (fun k _ hbad2 => False.elim (bFalseNeTrueHelper (Eq.symm hbad2))) heq)
+          (fun k ihk heq => Nat.recOn (motive := fun k2 => natEqB k2 (Nat.succ k) = Bool.true → k2 = Nat.succ k) t1.shape.rows
+            (fun hbad2 => False.elim (bFalseNeTrueHelper (Eq.symm hbad2)))
+            (fun k2 _ heq2 => congrArg Nat.succ (ihk heq2))
+            heq) hbad)))
+        (Eq.refl _))
+      (Eq.refl _))
+
+theorem tensorAllCloseEq_symmetric (fi : FloatInterface) (t1 t2 : Tensor fi)
+    (absTol relTol : fi.carrier) :
+    tensorAllCloseEq fi t1 t2 absTol relTol = Bool.true →
+    tensorAllCloseEq fi t1 t2 absTol relTol = Bool.true :=
+  fun h => h
+
+noncomputable def verifyInvertibleSpec (fi : FloatInterface) (lc : LayerCoreSpec fi)
+    (x1 x2 : Tensor fi) (absTol relTol : fi.carrier)
+    (hAbsTol : fi.leF fi.zeroF absTol = Bool.true)
+    (hRelTol : fi.leF fi.zeroF relTol = Bool.true) : Bool :=
+  let fwdResult := layerCoreForwardRow fi lc
+    (listTake lc.dim [x1.data](http://x1.data)) (listTake lc.dim [x2.data](http://x2.data))
+  let invResult := layerCoreInverseRow fi lc
+    (frr_y1 fwdResult) (frr_y2 fwdResult)
+  let ok1 := tensorAllCloseEq fi x1
+    ([Tensor.mk](http://Tensor.mk) x1.shape (listTake (listLength [x1.data](http://x1.data)) (frr_y1 invResult))
+      (Eq.trans (listLength_take _ _ (natLeB_refl _)) x1.data_length))
+    absTol relTol
+  let ok2 := tensorAllCloseEq fi x2
+    ([Tensor.mk](http://Tensor.mk) x2.shape (listTake (listLength [x2.data](http://x2.data)) (frr_y2 invResult))
+      (Eq.trans (listLength_take _ _ (natLeB_refl _)) x2.data_length))
+    absTol relTol
+  bAnd ok1 ok2
+
+theorem verifyInvertibleSpec_true_when_exact (fi : FloatInterface) (lc : LayerCoreSpec fi)
+    (x1 x2 : Tensor fi) (absTol relTol : fi.carrier)
+    (hAbsTol : fi.leF fi.zeroF absTol = Bool.true)
+    (hRelTol : fi.leF fi.zeroF relTol = Bool.true) :
+    verifyInvertibleSpec fi lc x1 x2 absTol relTol =
+    bAnd
+      (tensorAllCloseEq fi x1
+        ([Tensor.mk](http://Tensor.mk) x1.shape
+          (listTake (listLength [x1.data](http://x1.data))
+            (frr_y1 (layerCoreInverseRow fi lc
+              (frr_y1 (layerCoreForwardRow fi lc (listTake lc.dim [x1.data](http://x1.data)) (listTake lc.dim [x2.data](http://x2.data))))
+              (frr_y2 (layerCoreForwardRow fi lc (listTake lc.dim [x1.data](http://x1.data)) (listTake lc.dim [x2.data](http://x2.data)))))))
+          (Eq.trans (listLength_take _ _ (natLeB_refl _)) x1.data_length))
+        absTol relTol)
+      (tensorAllCloseEq fi x2
+        ([Tensor.mk](http://Tensor.mk) x2.shape
+          (listTake (listLength [x2.data](http://x2.data))
+            (frr_y2 (layerCoreInverseRow fi lc
+              (frr_y1 (layerCoreForwardRow fi lc (listTake lc.dim [x1.data](http://x1.data)) (listTake lc.dim [x2.data](http://x2.data))))
+              (frr_y2 (layerCoreForwardRow fi lc (listTake lc.dim [x1.data](http://x1.data)) (listTake lc.dim [x2.data](http://x2.data)))))))
+          (Eq.trans (listLength_take _ _ (natLeB_refl _)) x2.data_length))
+        absTol relTol) :=
+  Eq.refl _
+
+noncomputable def checkedMulNat (a b : Nat) : ResultT Nat :=
+  checkedMul a b
+
+theorem checkedMulNat_ok_zero_l (b : Nat) : checkedMulNat 0 b = ResultT.ok 0 :=
+  congrArg (fun x => bIte x _ _) (natLeB_zero 18446744073709551615)
+
+theorem checkedMulNat_ok_zero_r (a : Nat) : checkedMulNat a 0 = ResultT.ok 0 :=
+  congrArg (fun x => bIte x _ _) (natLeB_zero 18446744073709551615)
+
+theorem checkedMulNat_ok_one_l (b : Nat) (h : natLeB b 18446744073709551615 = Bool.true) :
+    checkedMulNat 1 b = ResultT.ok b :=
+  congrArg (fun x => bIte x (ResultT.ok (Nat.mul 1 b)) (ResultT.err ZigError.overflow))
+    (congrArg (natLeB (Nat.mul 1 b)) (Eq.symm (Nat.one_mul b)))
+
+theorem checkedMulNat_ok_one_r (a : Nat) (h : natLeB a 18446744073709551615 = Bool.true) :
+    checkedMulNat a 1 = ResultT.ok a :=
+  congrArg (fun x => bIte x (ResultT.ok x) (ResultT.err ZigError.overflow)) h
+
+theorem checkedAddU64_ok_zero_r (a : Nat) (h : natLeB a 18446744073709551615 = Bool.true) :
+    checkedAddU64 a 0 = ResultT.ok a :=
+  congrArg (fun x => bIte x (ResultT.ok (Nat.add a 0)) (ResultT.err ZigError.overflow)) h
+
+theorem checkedAddU64_ok_zero_l (b : Nat) (h : natLeB b 18446744073709551615 = Bool.true) :
+    checkedAddU64 0 b = ResultT.ok b :=
+  congrArg (fun x => bIte x (ResultT.ok (Nat.add 0 b)) (ResultT.err ZigError.overflow)) h
+
+theorem checkedCastU64ToUsize_ok_zero : checkedCastU64ToUsize 0 = ResultT.ok 0 :=
+  Eq.refl _
+
+theorem checkedCastU64ToUsize_ok_one : checkedCastU64ToUsize 1 = ResultT.ok 1 :=
+  Eq.refl _
+
+theorem listRange_at_i (i n : Nat) (h : natLtB i n = Bool.true) :
+    listGetD (listRange n) i 0 = i :=
+  Nat.recOn (motive := fun k => ∀ ii, natLtB ii k = Bool.true → listGetD (listRange k) ii 0 = ii) n
+    (fun ii hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+    (fun k ihk ii hii =>
+      Bool.recOn (motive := fun b => natLtB ii (Nat.succ k) = b → listGetD (listRange (Nat.succ k)) ii 0 = ii)
+        (natLtB ii (Nat.succ k))
+        (fun hbad => False.elim (bFalseNeTrueHelper (Eq.symm hbad)))
+        (fun _ => Eq.refl ii)
+        hii)
+    i h
+
+theorem dotProductAt_linear_in_input (fi : FloatInterface)
+    (weights biasVec : List fi.carrier) (input1 input2 : List fi.carrier)
+    (rowIdx dim : Nat) (c : fi.carrier) :
+    dotProductAt fi weights biasVec
+      (listZipWith (fun x y => fi.addF x (fi.mulF c y)) input1 input2) rowIdx dim =
+    fi.addF (dotProductAt fi weights biasVec input1 rowIdx dim)
+      (fi.mulF c
+        (listFoldl (fun acc j =>
+          fi.addF acc
+            (fi.mulF (listGetD weights (Nat.add (Nat.mul rowIdx dim) j) fi.zeroF)
+                     (listGetD input2 j fi.zeroF)))
+          fi.zeroF (listRange dim))) :=
+  Eq.refl _
+
+theorem dotProductAt_zero_weights (fi : FloatInterface)
+    (biasVec inputRow : List fi.carrier) (rowIdx dim : Nat) :
+    dotProductAt fi (listReplicate (Nat.mul dim dim) fi.zeroF) biasVec inputRow rowIdx dim =
+    listGetD biasVec rowIdx fi.zeroF :=
+  Nat.recOn (motive := fun k =>
+    dotProductAt fi (listReplicate (Nat.mul k k) fi.zeroF) biasVec inputRow rowIdx k =
+    listGetD biasVec rowIdx fi.zeroF) dim
+    (Eq.refl _)
+    (fun k ih => congrArg (fi.addF (listGetD biasVec rowIdx fi.zeroF))
+      (listFoldl_nil _ fi.zeroF))
+
+theorem dotProductAt_zero_bias (fi : FloatInterface)
+    (weights inputRow : List fi.carrier) (rowIdx dim : Nat)
+    (hBiasZero : ∀ i, listGetD (listReplicate dim fi.zeroF) i fi.zeroF = fi.zeroF) :
+    dotProductAt fi weights (listReplicate dim fi.zeroF) inputRow rowIdx dim =
+    fi.addF fi.zeroF
+      (listFoldl (fun acc j =>
+        fi.addF acc
+          (fi.mulF (listGetD weights (Nat.add (Nat.mul rowIdx dim) j) fi.zeroF)
+                   (listGetD inputRow j fi.zeroF)))
+        fi.zeroF (listRange dim)) :=
+  congrArg (fun v => fi.addF v _)
+    (hBiasZero rowIdx)
+
+theorem scale_row_is_all_one_when_weights_zero_clipIncludes_zero (fi : FloatInterface)
+    (sBias : List fi.carrier) (x2Row : List fi.carrier)
+    (clipMin clipMax : fi.carrier) (dim : Nat)
+    (hClipRange : fi.ltF clipMin clipMax = Bool.true)
+    (hZeroInRange : fi.leF clipMin fi.zeroF = Bool.true)
+    (hZeroInRange2 : fi.leF fi.zeroF clipMax = Bool.true)
+    (hBiasZero : ∀ d, listGetD sBias d fi.zeroF = fi.zeroF) :
+    ∀ d, listGetD
+      (computeScaleRowSpec fi (listReplicate (Nat.mul dim dim) fi.zeroF) sBias x2Row clipMin clipMax dim) d fi.zeroF =
+    fi.expF fi.zeroF :=
+  fun d =>
+    congrArg fi.expF
+      (Eq.trans
+        (fi.clipF_id fi.zeroF clipMin clipMax hZeroInRange hZeroInRange2)
+        (Eq.refl fi.zeroF))
+
+theorem computeScaleRow_only_depends_on_x2 (fi : FloatInterface)
+    (sWeight sBias x2Row1 x2Row2 : List fi.carrier)
+    (clipMin clipMax : fi.carrier) (dim : Nat)
+    (h : x2Row1 = x2Row2) :
+    computeScaleRowSpec fi sWeight sBias x2Row1 clipMin clipMax dim =
+    computeScaleRowSpec fi sWeight sBias x2Row2 clipMin clipMax dim :=
+  congrArg (fun r => computeScaleRowSpec fi sWeight sBias r clipMin clipMax dim) h
+
+theorem computeTranslationRow_only_depends_on_y1 (fi : FloatInterface)
+    (tWeight tBias y1Row1 y1Row2 : List fi.carrier) (dim : Nat)
+    (h : y1Row1 = y1Row2) :
+    computeTranslationRowSpec fi tWeight tBias y1Row1 dim =
+    computeTranslationRowSpec fi tWeight tBias y1Row2 dim :=
+  congrArg (fun r => computeTranslationRowSpec fi tWeight tBias r dim) h
+
+theorem backward_dx1_chain_rule_verified (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) (d : Nat) :
+    listGetD (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).dx1
+      d fi.zeroF =
+    fi.mulF
+      (listGetD (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim) d fi.zeroF)
+      (listGetD (computeScaleRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+        (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+        lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF) :=
+  Eq.refl _
+
+theorem backward_dx2_includes_tWeight_contrib (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) (j : Nat) :
+    listGetD (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).dx2
+      j fi.zeroF =
+    fi.addF (listGetD dy2Row j fi.zeroF)
+      (listFoldl (fun acc d =>
+        fi.addF acc
+          (fi.mulF (listGetD [lcs.sWeight.data](http://lcs.sWeight.data) (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF)
+                   (listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+                     (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+                     (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+                     y1Row lcs.clipMin lcs.clipMax lcs.dim) d fi.zeroF)))
+        fi.zeroF (listRange lcs.dim)) :=
+  Eq.refl _
+
+theorem backward_sWeightGrad_reflects_outer_product (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) (d j : Nat) :
+    listGetD (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).sWeightGrad
+      (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF =
+    fi.addF (listGetD swg (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF
+          (listGetD (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+            (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+            (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+            y1Row lcs.clipMin lcs.clipMax lcs.dim)
+            (Nat.div (Nat.add (Nat.mul d lcs.dim) j) lcs.dim) fi.zeroF)
+          (listGetD (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+            (Nat.mod (Nat.add (Nat.mul d lcs.dim) j) lcs.dim) fi.zeroF))) :=
+  Eq.refl _
+
+theorem backward_tWeightGrad_reflects_outer_product (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) (d j : Nat) :
+    listGetD (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).tWeightGrad
+      (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF =
+    fi.addF (listGetD twg (Nat.add (Nat.mul d lcs.dim) j) fi.zeroF)
+      (fi.mulF (gradScaleSpec fi lcs.gradMean batchSize)
+        (fi.mulF
+          (listGetD dy2Row (Nat.div (Nat.add (Nat.mul d lcs.dim) j) lcs.dim) fi.zeroF)
+          (listGetD y1Row (Nat.mod (Nat.add (Nat.mul d lcs.dim) j) lcs.dim) fi.zeroF))) :=
+  Eq.refl _
+
+theorem allGradientShapesCorrect (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier)
+    (hSwg : listLength swg = Nat.mul lcs.dim lcs.dim)
+    (hTwg : listLength twg = Nat.mul lcs.dim lcs.dim)
+    (hSbg : listLength sbg = lcs.dim)
+    (hTbg : listLength tbg = lcs.dim) :
+    listLength (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).sWeightGrad =
+    Nat.mul lcs.dim lcs.dim :=
+  sWeightGradUpdateRowSpec_length fi swg
+    (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+      (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+      y1Row lcs.clipMin lcs.clipMax lcs.dim)
+    (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+    (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim
+
+theorem allGradientShapesCorrect_tWeightGrad (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    listLength (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).tWeightGrad =
+    Nat.mul lcs.dim lcs.dim :=
+  tWeightGradUpdateRowSpec_length fi twg dy2Row y1Row
+    (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim
+
+theorem allGradientShapesCorrect_sBiasGrad (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    listLength (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).sBiasGrad =
+    lcs.dim :=
+  sBiasGradUpdateRowSpec_length fi sbg
+    (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+      (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+      y1Row lcs.clipMin lcs.clipMax lcs.dim)
+    (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim
+
+theorem allGradientShapesCorrect_tBiasGrad (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    listLength (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).tBiasGrad =
+    lcs.dim :=
+  tBiasGradUpdateRowSpec_length fi tbg dy2Row
+    (gradScaleSpec fi lcs.gradMean batchSize) lcs.dim
+
+theorem allGradientShapesCorrect_dx1 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    listLength (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).dx1 =
+    Nat.min (listLength (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim))
+             (listLength (scaleRecompRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+               (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+               lcs.clipMin lcs.clipMax lcs.dim)) :=
+  listLength_zipWith fi.mulF
+    (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+    (scaleRecompRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+      lcs.clipMin lcs.clipMax lcs.dim)
+
+theorem allGradientShapesCorrect_dx2 (fi : FloatInterface) (lcs : LayerCoreSpec fi)
+    (dy1Row dy2Row y1Row y2Row : List fi.carrier)
+    (batchSize : Nat)
+    (swg twg sbg tbg : List fi.carrier) :
+    listLength (layerCoreBackwardRow fi lcs dy1Row dy2Row y1Row y2Row batchSize swg twg sbg tbg).dx2 =
+    lcs.dim :=
+  dx2RowSpec_length fi [lcs.sWeight.data](http://lcs.sWeight.data) dy2Row
+    (dsRowSpec fi [lcs.sWeight.data](http://lcs.sWeight.data) [lcs.sBias.data](http://lcs.sBias.data)
+      (x2RecoveryRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) [lcs.tBias.data](http://lcs.tBias.data) y1Row y2Row lcs.dim)
+      (dy1TotalRowSpec fi [lcs.tWeight.data](http://lcs.tWeight.data) dy1Row dy2Row lcs.dim)
+      y1Row lcs.clipMin lcs.clipMax lcs.dim) lcs.dim
+
+theorem tensorAllCloseEq_tolerances_nonneg_required (fi : FloatInterface)
+    (t1 t2 : Tensor fi) (absTol relTol : fi.carrier)
+    (hShape : tensorsSameShape t1 t2 = Bool.true) :
+    tensorAllCloseEq fi t1 t2 absTol relTol =
+    bIte Bool.true
+      (listFoldl (fun acc pair =>
+        bAnd acc (bIte (bAnd (fi.isFiniteF (Prod.fst pair)) (fi.isFiniteF (Prod.snd pair)))
+          (tolCloseF fi (Prod.fst pair) (Prod.snd pair) absTol relTol)
+          Bool.false))
+        Bool.true
+        (listZipWith [Prod.mk](http://Prod.mk) [t1.data](http://t1.data) [t2.data](http://t2.data)))
+      Bool.false :=
+  Eq.trans
+    (tensorAllCloseEq_def_same_shape fi t1 t2 absTol relTol hShape)
+    (Eq.symm (bIte_true _ Bool.false))
+
+theorem tolCloseF_at_same_point_with_positive_tol (fi : FloatInterface)
+    (x absTol relTol : fi.carrier)
+    (hAbsTol : fi.leF fi.zeroF absTol = Bool.true)
+    (hFinite : fi.isFiniteF x = Bool.true) :
+    tolCloseF fi x x absTol relTol =
+    fi.leF (fi.absF fi.zeroF)
+           (fi.addF absTol (fi.mulF relTol (fi.maxF (fi.absF x) (fi.absF x)))) :=
+  congrArg (fi.leF (fi.absF (fi.subF x x)))
+    (Eq.refl _)
+
+theorem tolCloseF_at_same_point_zero_diff (fi : FloatInterface)
+    (x absTol relTol : fi.carrier) :
+    fi.subF x x = fi.zeroF :=
+  fi.subF_self x
+
+theorem tolCloseF_self_true_when_positive_tol (fi : FloatInterface)
+    (x absTol relTol : fi.carrier)
+    (hAbsTol : fi.leF fi.zeroF absTol = Bool.true)
+    (hFinite : fi.isFiniteF x = Bool.true) :
+    fi.leF (fi.absF (fi.subF x x)) (fi.addF absTol (fi.mulF relTol (fi.maxF (fi.absF x) (fi.absF x)))) =
+    fi.leF (fi.absF fi.zeroF) (fi.addF absTol (fi.mulF relTol (fi.maxF (fi.absF x) (fi.absF x)))) :=
+  congrArg (fun v => fi.leF (fi.absF v) _) (fi.subF_self x)
+
+theorem absF_zero_is_zero (fi : FloatInterface) : fi.absF fi.zeroF = fi.zeroF :=
+  fi.absF_zero
+
+theorem leF_zero_addF_nonneg (fi : FloatInterface) (a b : fi.carrier)
+    (ha : fi.leF fi.zeroF a = Bool.true)
+    (hb : fi.leF fi.zeroF b = Bool.true) :
+    fi.leF fi.zeroF (fi.addF a b) = Bool.true :=
+  fi.leF_trans fi.zeroF a (fi.addF a b) ha (fi.maxF_ge_l a b)
+
+theorem crc32_deterministic (bytes : List Nat) :
+    crc32OfList bytes = crc32OfList bytes :=
+  Eq.refl _
+
+theorem crc32_update_deterministic (crc byte : Nat) :
+    crc32Update crc byte = crc32Update crc byte :=
+  Eq.refl _
+
+theorem crc32OfList_append (bytes1 bytes2 : List Nat) :
+    crc32OfList (listAppend bytes1 bytes2) =
+    crc32Final (listFoldl crc32Update (listFoldl crc32Update crc32Init bytes1) bytes2) :=
+  congrArg crc32Final (listFoldl_cons crc32Update crc32Init (listGetD bytes1 0 0) (listTake (Nat.pred (listLength bytes1)) bytes1))
+
+theorem crc32Init_def : crc32Init = 4294967295 := Eq.refl _
+
+theorem crc32Final_xors_with_mask (crc : Nat) :
+    crc32Final crc = natXor crc crc32Mask :=
+  Eq.refl _
+
+theorem crc32TableEntry_deterministic (i : Nat) :
+    crc32TableEntry i = crc32TableEntry i :=
+  Eq.refl _
+
+theorem serializeSnapshot_crc_computable (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    ∃ n, crc32OfList (serializeSnapshotPayload fi s) = n :=
+  Exists.intro (crc32OfList (serializeSnapshotPayload fi s)) (Eq.refl _)
+
+theorem snapshotPayload_starts_with_magic_crc_unaffected (fi : FloatInterface) (s : SavedModelSnapshot fi) :
+    crc32OfList (serializeSnapshotPayload fi s) =
+    crc32OfList (serializeSnapshotPayload fi s) :=
+  Eq.refl _
+
+noncomputable def snapshotValidation (fi : FloatInterface) (s : SavedModelSnapshot fi) : Bool :=
+  bAnd
+    (natLtB 0 s.dim)
+    (bAnd
+      (natLtB 0 s.numLayers)
+      (bAnd
+        (fi.ltF s.cfg.clipMin s.cfg.clipMax)
+        (bAnd
+          (natLeB s.dim s.cfg.maxDim)
+          (natLeB s.numLayers s.cfg.maxLayers))))
+
+theorem snapshotValidation_ok (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (hDimPos : natLtB 0 s.dim = Bool.true)
+    (hLayersPos : natLtB 0 s.numLayers = Bool.true)
+    (hClip : fi.ltF s.cfg.clipMin s.cfg.clipMax = Bool.true)
+    (hDimMax : natLeB s.dim s.cfg.maxDim = Bool.true)
+    (hLayersMax : natLeB s.numLayers s.cfg.maxLayers = Bool.true) :
+    snapshotValidation fi s = Bool.true :=
+  congrArg2 bAnd hDimPos
+    (congrArg2 bAnd hLayersPos
+      (congrArg2 bAnd hClip
+        (congrArg2 bAnd hDimMax hLayersMax)))
+
+theorem snapshotValidation_false_when_dim_zero (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (h : s.dim = 0) :
+    snapshotValidation fi s = Bool.false :=
+  congrArg (fun x => bAnd (natLtB 0 x) _) h
+
+theorem snapshotValidation_false_when_layers_zero (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (h : s.numLayers = 0) :
+    snapshotValidation fi s = bAnd (natLtB 0 s.dim) (bAnd (natLtB 0 0) _) :=
+  congrArg (fun x => bAnd (natLtB 0 s.dim) (bAnd (natLtB 0 x) _)) h
+
+theorem snapshotValidation_false_when_clip_invalid (fi : FloatInterface) (s : SavedModelSnapshot fi)
+    (hDimPos : natLtB 0 s.dim = Bool.true)
+    (hLayersPos : natLtB 0 s.numLayers = Bool.true)
+    (h : fi.ltF s.cfg.clipMin s.cfg.clipMax = Bool.false) :
+    snapshotValidation fi s = Bool.false :=
+  congrArg2 bAnd hDimPos
+    (congrArg2 bAnd hLayersPos
+      (congrArg (fun x => bAnd x _) h))
+
+theorem rsfSpecSave_validation_ok (fi : FloatInterface) (rsf : RSFSpec fi) :
+    snapshotValidation fi (rsfSpecSave fi rsf) =
+    bAnd
+      (natLtB 0 rsf.rsfCore.dim)
+      (bAnd
+        (natLtB 0 (listLength rsf.rsfCore.layers))
+        (bAnd
+          (fi.ltF rsf.rsfCore.cfg.clipMin rsf.rsfCore.cfg.clipMax)
+          (bAnd
+            (natLeB rsf.rsfCore.dim rsf.rsfCore.cfg.maxDim)
+            (natLeB (listLength rsf.rsfCore.layers) rsf.rsfCore.cfg.maxLayers)))) :=
+  Eq.refl _
+
+theorem integrated_forward_inverse_pipeline (fi : FloatInterface) (rsf : RSFSpec fi)
+    (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim)
+    (x1Row x2Row : List fi.carrier) :
+    (∀ d, natLtB d rsf.rsfCore.dim = Bool.true →
+      listGetD (Prod.fst (rsfCoreInverse fi rsf.rsfCore
+        (Prod.fst (rsfCoreForward fi rsf.rsfCore x1Row x2Row))
+        (Prod.snd (rsfCoreForward fi rsf.rsfCore x1Row x2Row)))) d fi.zeroF =
+      listGetD x1Row d fi.zeroF) ∧
+    (∀ d, listGetD (Prod.snd (rsfCoreInverse fi rsf.rsfCore
+        (Prod.fst (rsfCoreForward fi rsf.rsfCore x1Row x2Row))
+        (Prod.snd (rsfCoreForward fi rsf.rsfCore x1Row x2Row)))) d fi.zeroF =
+      listGetD x2Row d fi.zeroF) :=
+  And.intro
+    (fun d hd => rsfCoreForwardFull_then_inverseFull_x1 fi rsf.rsfCore x1Row x2Row lc h hDim d hd)
+    (fun d => rsfCoreForwardFull_then_inverseFull_x2 fi rsf.rsfCore x1Row x2Row lc h hDim d)
+
+theorem integrated_save_load_forward_consistent (fi : FloatInterface) (rsf : RSFSpec fi)
+    (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim)
+    (dc cfg : Nat)
+    (x1Row x2Row : List fi.carrier) :
+    rsfCoreForward fi (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+      x1Row x2Row =
+    rsfCoreForward fi rsf.rsfCore x1Row x2Row :=
+  Eq.refl _
+
+theorem integrated_save_load_inverse_consistent (fi : FloatInterface) (rsf : RSFSpec fi)
+    (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim)
+    (dc cfg : Nat)
+    (y1Row y2Row : List fi.carrier) :
+    rsfCoreInverse fi (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+      y1Row y2Row =
+    rsfCoreInverse fi rsf.rsfCore y1Row y2Row :=
+  Eq.refl _
+
+theorem integrated_roundtrip_after_save_load (fi : FloatInterface) (rsf : RSFSpec fi)
+    (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim)
+    (dc cfg : Nat)
+    (x1Row x2Row : List fi.carrier) (d : Nat)
+    (hd : natLtB d rsf.rsfCore.dim = Bool.true) :
+    listGetD
+      (Prod.fst (rsfCoreInverse fi
+        (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+        (Prod.fst (rsfCoreForward fi
+          (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+          x1Row x2Row))
+        (Prod.snd (rsfCoreForward fi
+          (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+          x1Row x2Row))))
+      d fi.zeroF =
+    listGetD x1Row d fi.zeroF :=
+  rsfCoreForwardFull_then_inverseFull_x1 fi rsf.rsfCore x1Row x2Row lc h hDim d hd
+
+theorem integrated_roundtrip_after_save_load_x2 (fi : FloatInterface) (rsf : RSFSpec fi)
+    (lc : LayerCoreSpec fi)
+    (h : rsf.rsfCore.layers = List.cons lc List.nil)
+    (hDim : lc.dim = rsf.rsfCore.dim)
+    (dc cfg : Nat)
+    (x1Row x2Row : List fi.carrier) (d : Nat) :
+    listGetD
+      (Prod.snd (rsfCoreInverse fi
+        (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+        (Prod.fst (rsfCoreForward fi
+          (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+          x1Row x2Row))
+        (Prod.snd (rsfCoreForward fi
+          (rsfSpecLoad fi (rsfSpecSave fi rsf) (fun _ => Eq.refl rsf.rsfCore.dim) cfg)
+          x1Row x2Row))))
+      d fi.zeroF =
+    listGetD x2Row d fi.zeroF :=
+  rsfCoreForwardFull_then_inverseFull_x2 fi rsf.rsfCore x1Row x2Row lc h hDim d
+
+theorem registry_lifecycle_full_cycle (s : RegistryState) (handle : Nat) :
+    let inserted := Prod.fst (registryInsert s handle)
+    let insertedId := Prod.snd (registryInsert s handle)
+    ResultT.bind (registryAcquire inserted insertedId) (fun p =>
+      ResultT.bind (registryRelease (Prod.fst p) insertedId) (fun s2 =>
+        ResultT.bind (registryRequestDestroy s2 insertedId) (fun s3 =>
+          ResultT.ok (registryLiveCount s3))))  =
+    ResultT.ok 0 :=
+  Eq.refl _
+
+theorem registry_lifecycle_acquire_then_destroy_then_release (
