@@ -9,6 +9,7 @@ const Sha512 = crypto.hash.sha2.Sha512;
 const ChildProcess = std.process.Child;
 const fs = std.fs;
 const json = std.json;
+const i256 = std.math.Int(256);
 
 pub const ZKProofError = error{
     CircomCompilationFailed,
@@ -26,6 +27,11 @@ pub const ZKProofError = error{
     Timeout,
     InvalidInput,
     InvalidOutput,
+    ValueOutOfRange,
+    EmptySet,
+    InvalidIndex,
+    InsufficientParticipants,
+    DimensionMismatch,
 };
 
 pub const ZKCircuitConfig = struct {
@@ -63,16 +69,13 @@ pub const Groth16Proof = struct {
     pi_b: [3][2][96]u8,
     pi_c: [3][96]u8,
     protocol: [7]u8,
-    curve: [4]u8,
+    curve: [5]u8,
 
     pub fn init() Groth16Proof {
-        return Groth16Proof{
-            .pi_a = undefined,
-            .pi_b = undefined,
-            .pi_c = undefined,
-            .protocol = [_]u8{ 'g', 'r', 'o', 't', 'h', '1', '6' },
-            .curve = [_]u8{ 'b', 'n', '1', '2' },
-        };
+        var proof = std.mem.zeroes(Groth16Proof);
+        proof.protocol = .{ 'g', 'r', 'o', 't', 'h', '1', '6' };
+        proof.curve = .{ 'b', 'n', '1', '2', '8' };
+        return proof;
     }
 };
 
@@ -165,8 +168,8 @@ pub const CircomProver = struct {
     }
 
     fn ensureDirectories(self: *Self) !void {
-        fs.cwd().makePath(self.config.witness_dir) catch {};
-        fs.cwd().makePath(self.config.proof_dir) catch {};
+        try fs.cwd().makePath(self.config.witness_dir, .{});
+        try fs.cwd().makePath(self.config.proof_dir, .{});
     }
 
     fn checkPrerequisites(self: *Self) !void {
@@ -186,7 +189,8 @@ pub const CircomProver = struct {
     }
 
     pub fn compileCircuit(self: *Self) !void {
-        var args = [_][]const u8{
+        const args = &[_][]const u8{
+            self.snarkjs_path,
             "circom",
             self.config.circuit_path,
             "--r1cs",
@@ -196,13 +200,13 @@ pub const CircomProver = struct {
             "src/zk",
         };
 
-        var child = ChildProcess.init(&args, self.allocator);
+        var child = ChildProcess.init(args, self.allocator);
         child.cwd = fs.cwd();
 
         try child.spawn();
-        const result = try child.wait();
+        const term = try child.wait();
 
-        if (result.Exited != 0) {
+        if (term != .{.Exited = 0}) {
             return ZKProofError.CircomCompilationFailed;
         }
 
@@ -210,7 +214,7 @@ pub const CircomProver = struct {
     }
 
     pub fn setupKeys(self: *Self, ptau_path: []const u8) !void {
-        var contribute_args = [_][]const u8{
+        const contribute_args = &[_][]const u8{
             self.snarkjs_path,
             "snarkjs",
             "groth16",
@@ -220,17 +224,17 @@ pub const CircomProver = struct {
             self.config.zkey_path,
         };
 
-        var child = ChildProcess.init(&contribute_args, self.allocator);
+        var child = ChildProcess.init(contribute_args, self.allocator);
         child.cwd = fs.cwd();
 
         try child.spawn();
-        const result = try child.wait();
+        const term = try child.wait();
 
-        if (result.Exited != 0) {
+        if (term != .{.Exited = 0}) {
             return ZKProofError.KeysNotGenerated;
         }
 
-        var export_args = [_][]const u8{
+        const export_args = &[_][]const u8{
             self.snarkjs_path,
             "snarkjs",
             "zkey",
@@ -240,13 +244,13 @@ pub const CircomProver = struct {
             self.config.vkey_path,
         };
 
-        var export_child = ChildProcess.init(&export_args, self.allocator);
+        var export_child = ChildProcess.init(export_args, self.allocator);
         export_child.cwd = fs.cwd();
 
         try export_child.spawn();
-        const export_result = try export_child.wait();
+        const export_term = try export_child.wait();
 
-        if (export_result.Exited != 0) {
+        if (export_term != .{.Exited = 0}) {
             return ZKProofError.KeysNotGenerated;
         }
 
@@ -265,7 +269,7 @@ pub const CircomProver = struct {
         );
         defer self.allocator.free(witness_gen_path);
 
-        var args = [_][]const u8{
+        const args = &[_][]const u8{
             self.node_path,
             witness_gen_path,
             self.config.wasm_path,
@@ -273,13 +277,13 @@ pub const CircomProver = struct {
             witness_path,
         };
 
-        var child = ChildProcess.init(&args, self.allocator);
+        var child = ChildProcess.init(args, self.allocator);
         child.cwd = fs.cwd();
 
         try child.spawn();
-        const result = try child.wait();
+        const term = try child.wait();
 
-        if (result.Exited != 0) {
+        if (term != .{.Exited = 0}) {
             return ZKProofError.WitnessGenerationFailed;
         }
     }
@@ -289,7 +293,7 @@ pub const CircomProver = struct {
             return ZKProofError.KeysNotGenerated;
         }
 
-        var args = [_][]const u8{
+        const args = &[_][]const u8{
             self.snarkjs_path,
             "snarkjs",
             "groth16",
@@ -300,19 +304,19 @@ pub const CircomProver = struct {
             public_path,
         };
 
-        var child = ChildProcess.init(&args, self.allocator);
+        var child = ChildProcess.init(args, self.allocator);
         child.cwd = fs.cwd();
 
         try child.spawn();
-        const result = try child.wait();
+        const term = try child.wait();
 
-        if (result.Exited != 0) {
+        if (term != .{.Exited = 0}) {
             return ZKProofError.ProofGenerationFailed;
         }
     }
 
     pub fn verifyProof(self: *Self, proof_path: []const u8, public_path: []const u8) !bool {
-        var args = [_][]const u8{
+        const args = &[_][]const u8{
             self.snarkjs_path,
             "snarkjs",
             "groth16",
@@ -322,19 +326,19 @@ pub const CircomProver = struct {
             proof_path,
         };
 
-        var child = ChildProcess.init(&args, self.allocator);
+        var child = ChildProcess.init(args, self.allocator);
         child.cwd = fs.cwd();
         child.stdout_behavior = .Pipe;
 
         try child.spawn();
 
         var stdout_buffer: [4096]u8 = undefined;
-        const stdout_bytes = try child.stdout.?.readAll(&stdout_buffer);
+        const stdout_bytes = try child.stdout.?.readAll(stdout_buffer[0..]);
         const stdout = stdout_buffer[0..stdout_bytes];
 
-        const result = try child.wait();
+        const term = try child.wait();
 
-        if (result.Exited != 0) {
+        if (term != .{.Exited = 0}) {
             return false;
         }
 
@@ -360,17 +364,21 @@ pub const InferenceWitness = struct {
     pub fn init(allocator: Allocator, num_layers: usize, dim: usize) !*Self {
         const self = try allocator.create(Self);
 
-        const tokens = try allocator.alloc(i64, dim);
-        @memset(tokens, 0);
-
-        const expected_output = try allocator.alloc(i64, dim);
-        @memset(expected_output, 0);
-
-        const layer_commitments = try allocator.alloc(i256, num_layers);
-        @memset(layer_commitments, 0);
+        const tokens = try allocator.calloc(i64, dim);
+        const expected_output = try allocator.calloc(i64, dim);
+        const layer_commitments = try allocator.calloc(i256, num_layers);
 
         const layer_weights_s = try allocator.alloc([][]i64, num_layers);
         const layer_weights_t = try allocator.alloc([][]i64, num_layers);
+
+        errdefer {
+            allocator.free(layer_weights_t);
+            allocator.free(layer_weights_s);
+            allocator.free(layer_commitments);
+            allocator.free(expected_output);
+            allocator.free(tokens);
+            allocator.destroy(self);
+        }
 
         var layer_idx: usize = 0;
         while (layer_idx < num_layers) : (layer_idx += 1) {
@@ -379,10 +387,8 @@ pub const InferenceWitness = struct {
 
             var i: usize = 0;
             while (i < dim) : (i += 1) {
-                layer_weights_s[layer_idx][i] = try allocator.alloc(i64, dim);
-                layer_weights_t[layer_idx][i] = try allocator.alloc(i64, dim);
-                @memset(layer_weights_s[layer_idx][i], 0);
-                @memset(layer_weights_t[layer_idx][i], 0);
+                layer_weights_s[layer_idx][i] = try allocator.calloc(i64, dim);
+                layer_weights_t[layer_idx][i] = try allocator.calloc(i64, dim);
             }
         }
 
@@ -404,10 +410,6 @@ pub const InferenceWitness = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.allocator.free(self.tokens);
-        self.allocator.free(self.expected_output);
-        self.allocator.free(self.layer_commitments);
-
         var layer_idx: usize = 0;
         while (layer_idx < self.num_layers) : (layer_idx += 1) {
             var i: usize = 0;
@@ -420,6 +422,10 @@ pub const InferenceWitness = struct {
         }
         self.allocator.free(self.layer_weights_s);
         self.allocator.free(self.layer_weights_t);
+
+        self.allocator.free(self.layer_commitments);
+        self.allocator.free(self.expected_output);
+        self.allocator.free(self.tokens);
 
         self.allocator.destroy(self);
     }
@@ -466,7 +472,7 @@ pub const InferenceWitness = struct {
         }
         var input_hash: [32]u8 = undefined;
         input_hasher.final(&input_hash);
-        self.input_commitment = bytesToI256(&input_hash);
+        self.input_commitment = bytesToI256(input_hash[0..]);
 
         var output_hasher = Blake3.init(.{});
         for (self.expected_output) |out| {
@@ -475,7 +481,7 @@ pub const InferenceWitness = struct {
         }
         var output_hash: [32]u8 = undefined;
         output_hasher.final(&output_hash);
-        self.output_commitment = bytesToI256(&output_hash);
+        self.output_commitment = bytesToI256(output_hash[0..]);
 
         var layer_idx: usize = 0;
         while (layer_idx < self.num_layers) : (layer_idx += 1) {
@@ -492,17 +498,12 @@ pub const InferenceWitness = struct {
             }
             var layer_hash: [32]u8 = undefined;
             layer_hasher.final(&layer_hash);
-            self.layer_commitments[layer_idx] = bytesToI256(&layer_hash);
+            self.layer_commitments[layer_idx] = bytesToI256(layer_hash[0..]);
         }
     }
 
-    fn bytesToI256(bytes: *const [32]u8) i256 {
-        var result: i256 = 0;
-        var i: usize = 0;
-        while (i < 32) : (i += 1) {
-            result = (result << 8) | @as(i256, bytes[i]);
-        }
-        return result;
+    fn bytesToI256(bytes: []const u8) i256 {
+        return std.mem.readInt(i256, bytes, .big);
     }
 
     pub fn toJson(self: *Self, path: []const u8) !void {
@@ -680,15 +681,11 @@ pub const ZKInferenceProver = struct {
 
         const proof_file = try fs.cwd().openFile(proof_path, .{});
         defer proof_file.close();
-        const proof_size = try proof_file.getEndPos();
-        bundle.proof_json = try self.allocator.alloc(u8, proof_size);
-        _ = try proof_file.readAll(bundle.proof_json);
+        bundle.proof_json = try proof_file.readToEndAlloc(self.allocator, 1 * 1024 * 1024);
 
         const public_file = try fs.cwd().openFile(public_path, .{});
         defer public_file.close();
-        const public_size = try public_file.getEndPos();
-        bundle.public_json = try self.allocator.alloc(u8, public_size);
-        _ = try public_file.readAll(bundle.public_json);
+        bundle.public_json = try public_file.readToEndAlloc(self.allocator, 1 * 1024 * 1024);
 
         bundle.verification_status = try self.prover.verifyProof(proof_path, public_path);
 
@@ -713,12 +710,12 @@ pub const ZKInferenceProver = struct {
         defer self.allocator.free(public_path);
 
         var proof_file = try fs.cwd().createFile(proof_path, .{});
+        defer proof_file.close();
         try proof_file.writeAll(bundle.proof_json);
-        proof_file.close();
 
         var public_file = try fs.cwd().createFile(public_path, .{});
+        defer public_file.close();
         try public_file.writeAll(bundle.public_json);
-        public_file.close();
 
         const result = try self.prover.verifyProof(proof_path, public_path);
 
@@ -760,10 +757,10 @@ pub const CommitmentScheme = struct {
 
     pub fn commit(self: *Self, value: []const u8) ![32]u8 {
         var nonce: [32]u8 = undefined;
-        crypto.random.bytes(&nonce);
+        crypto.random.bytes(nonce[0..]);
 
         var blinding: [32]u8 = undefined;
-        crypto.random.bytes(&blinding);
+        crypto.random.bytes(blinding[0..]);
 
         var hasher = Blake3.init(.{});
         hasher.update(value);
@@ -849,16 +846,16 @@ pub const RangeProof = struct {
         }
 
         const range = self.max_value - self.min_value;
-        const bits_needed = @ctz(@as(u64, @intCast(range))) + 1;
+        const bits_needed = if (range == 0) 1 else std.math.bitSizeOf(@TypeOf(range)) - @clz(@as(u64, @intCast(range)));
 
         const normalized_value = value - self.min_value;
 
         var i: usize = 0;
         while (i < bits_needed) : (i += 1) {
-            const bit: u1 = @intCast((normalized_value >> @intCast(i)) & 1);
+            const bit: u1 = @intCast((normalized_value >> i) & 1);
 
             var nonce: [32]u8 = undefined;
-            crypto.random.bytes(&nonce);
+            crypto.random.bytes(nonce[0..]);
 
             var hasher = Blake3.init(.{});
             hasher.update(&[_]u8{bit});
@@ -890,7 +887,7 @@ pub const RangeProof = struct {
             }
 
             if (bit_proof.bit_value == 1) {
-                reconstructed_value |= @as(i64, 1) << @intCast(i);
+                reconstructed_value |= (@as(i64, 1) << i);
             }
         }
 
@@ -940,7 +937,7 @@ pub const MembershipProof = struct {
 
         while (current_level.items.len > 1) {
             var next_level = ArrayList([32]u8).init(self.allocator);
-            defer next_level.deinit();
+            errdefer next_level.deinit();
 
             var i: usize = 0;
             while (i < current_level.items.len) : (i += 2) {
@@ -960,6 +957,7 @@ pub const MembershipProof = struct {
 
             current_level.clearRetainingCapacity();
             try current_level.appendSlice(next_level.items);
+            next_level.deinit();
         }
 
         self.merkle_root = current_level.items[0];
@@ -1002,7 +1000,7 @@ pub const MembershipProof = struct {
             try self.directions.append(direction);
 
             var next_level = ArrayList([32]u8).init(self.allocator);
-            defer next_level.deinit();
+            errdefer next_level.deinit();
 
             var i: usize = 0;
             while (i < current_level.items.len) : (i += 2) {
@@ -1022,6 +1020,7 @@ pub const MembershipProof = struct {
 
             current_level.clearRetainingCapacity();
             try current_level.appendSlice(next_level.items);
+            next_level.deinit();
             current_index = current_index / 2;
         }
     }
@@ -1058,11 +1057,9 @@ pub const SchnorrSignature = struct {
 
     const Self = @This();
 
-    pub fn sign(allocator: Allocator, message: []const u8, private_key: [32]u8) !Self {
-        _ = allocator;
-
+    pub fn sign(message: []const u8, private_key: [32]u8) !Self {
         var k: [32]u8 = undefined;
-        crypto.random.bytes(&k);
+        crypto.random.bytes(k[0..]);
 
         var r_point: [32]u8 = undefined;
         var i: usize = 0;
@@ -1132,7 +1129,10 @@ pub const DifferentialPrivacy = struct {
     }
 
     pub fn addNoise(self: *Self, value: f64) f64 {
-        const rand1 = std.crypto.random.float(f64);
+        var rand1: f64 = 0.0;
+        while (rand1 == 0.0) {
+            rand1 = std.crypto.random.float(f64);
+        }
         const rand2 = std.crypto.random.float(f64);
 
         const z = @sqrt(-2.0 * @log(rand1)) * @cos(2.0 * std.math.pi * rand2);
@@ -1144,8 +1144,12 @@ pub const DifferentialPrivacy = struct {
     pub fn addLaplaceNoise(self: *Self, value: f64) f64 {
         const u = std.crypto.random.float(f64) - 0.5;
         const b = self.sensitivity / self.epsilon;
+        const sgn = if (u < 0) @as(f64, -1.0) else @as(f64, 1.0);
         const abs_u = if (u < 0) -u else u;
-        const noise = -b * @log(1.0 - 2.0 * abs_u) * if (u > 0) @as(f64, 1.0) else @as(f64, -1.0);
+        if (abs_u >= 0.5) {
+            return value;
+        }
+        const noise = -b * sgn * @log(1.0 - 2.0 * abs_u);
         return value + noise;
     }
 };
@@ -1269,7 +1273,7 @@ pub const ZKInferenceProof = struct {
             return bundle.verification_status;
         }
 
-        if (self.computation_proof.items.len < 1) {
+        if (self.computation_proof.items.len < 9) {
             return false;
         }
 
@@ -1360,11 +1364,15 @@ pub const SecureAggregation = struct {
             return error.InsufficientParticipants;
         }
 
-        const dim = contributions[0].len;
-        const result = try self.allocator.alloc(f64, dim);
-        for (result) |*val| {
-            val.* = 0.0;
+        if (contributions.len == 0) {
+            if (self.aggregated_result) |old| self.allocator.free(old);
+            self.aggregated_result = try self.allocator.alloc(f64, 0);
+            return;
         }
+
+        const dim = contributions[0].len;
+        const result = try self.allocator.calloc(f64, dim);
+        errdefer self.allocator.free(result);
 
         for (contributions) |contrib| {
             if (contrib.len != dim) {
@@ -1378,8 +1386,10 @@ pub const SecureAggregation = struct {
         }
 
         const count: f64 = @floatFromInt(contributions.len);
-        for (result) |*val| {
-            val.* /= count;
+        if (count > 0) {
+            for (result) |*val| {
+                val.* /= count;
+            }
         }
 
         if (self.aggregated_result) |old_result| {
@@ -1392,7 +1402,3 @@ pub const SecureAggregation = struct {
         return self.aggregated_result;
     }
 };
-
-
-
-
