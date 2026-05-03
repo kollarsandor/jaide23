@@ -20,6 +20,8 @@ const ChaosCoreKernel = chaos.ChaosCoreKernel;
 const FractalTree = fnds.FractalTree;
 const SymmetryPattern = esso.SymmetryPattern;
 
+pub const PatternId = [32]u8;
+
 pub const ThoughtLevel = enum(u8) {
     local = 0,
     global = 1,
@@ -41,26 +43,28 @@ pub const ReasoningPhase = struct {
     outer_iterations: usize,
     target_energy: f64,
     current_energy: f64,
+    previous_energy: f64,
     convergence_threshold: f64,
     phase_start_time: i64,
     phase_end_time: i64,
-    pattern_captures: ArrayList([32]u8),
+    pattern_captures: ArrayList(PatternId),
     allocator: Allocator,
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, level: ThoughtLevel, inner: usize, outer: usize) Self {
+    pub fn init(allocator: Allocator, level: ThoughtLevel, inner: usize, outer: usize, phase_id: u64) Self {
         return Self{
-            .phase_id = @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))),
+            .phase_id = phase_id,
             .level = level,
             .inner_iterations = inner,
             .outer_iterations = outer,
             .target_energy = 0.1,
             .current_energy = 1e6,
+            .previous_energy = 1e6,
             .convergence_threshold = 1e-6,
             .phase_start_time = @as(i64, @intCast(std.time.nanoTimestamp())),
             .phase_end_time = 0,
-            .pattern_captures = ArrayList([32]u8).init(allocator),
+            .pattern_captures = ArrayList(PatternId).init(allocator),
             .allocator = allocator,
         };
     }
@@ -69,12 +73,19 @@ pub const ReasoningPhase = struct {
         self.pattern_captures.deinit();
     }
 
-    pub fn recordPattern(self: *Self, pattern_id: [32]u8) !void {
+    pub fn recordPattern(self: *Self, pattern_id: PatternId) !void {
         try self.pattern_captures.append(pattern_id);
     }
 
     pub fn hasConverged(self: *const Self) bool {
-        return @abs(self.current_energy - self.target_energy) < self.convergence_threshold;
+        const delta = @abs(self.current_energy - self.previous_energy);
+        const denom = @max(@abs(self.previous_energy), 1.0);
+        return (delta / denom) < self.convergence_threshold;
+    }
+
+    pub fn updateEnergy(self: *Self, new_energy: f64) void {
+        self.previous_energy = self.current_energy;
+        self.current_energy = new_energy;
     }
 
     pub fn finalize(self: *Self) void {
@@ -131,8 +142,8 @@ pub const OrchestratorStatistics = struct {
         self.patterns_discovered += phase.pattern_captures.items.len;
 
         const duration = @as(f64, @floatFromInt(phase.getDuration()));
-        const prev_total = self.average_convergence_time * @as(f64, @floatFromInt(self.total_phases - 1));
-        self.average_convergence_time = (prev_total + duration) / @as(f64, @floatFromInt(self.total_phases));
+        const n = @as(f64, @floatFromInt(self.total_phases));
+        self.average_convergence_time += (duration - self.average_convergence_time) / n;
     }
 };
 
@@ -140,12 +151,15 @@ pub const ReasoningOrchestrator = struct {
     graph: *SelfSimilarRelationalGraph,
     esso: *EntangledStochasticSymmetryOptimizer,
     chaos_kernel: *ChaosCoreKernel,
-    active_phase: ?ReasoningPhase,
     phase_history: ArrayList(ReasoningPhase),
     statistics: OrchestratorStatistics,
     fast_inner_steps: usize,
     slow_outer_steps: usize,
     hierarchical_depth: usize,
+    perturb_node_limit: usize,
+    update_edge_limit: usize,
+    transform_node_limit: usize,
+    next_phase_id: u64,
     allocator: Allocator,
 
     const Self = @This();
@@ -160,20 +174,20 @@ pub const ReasoningOrchestrator = struct {
             .graph = graph,
             .esso = esso_opt,
             .chaos_kernel = kernel,
-            .active_phase = null,
             .phase_history = ArrayList(ReasoningPhase).init(allocator),
             .statistics = OrchestratorStatistics.init(),
             .fast_inner_steps = 50,
             .slow_outer_steps = 10,
             .hierarchical_depth = 3,
+            .perturb_node_limit = 10,
+            .update_edge_limit = 10,
+            .transform_node_limit = 5,
+            .next_phase_id = 1,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.active_phase) |*phase| {
-            phase.deinit();
-        }
         for (self.phase_history.items) |*phase| {
             phase.deinit();
         }
@@ -186,9 +200,25 @@ pub const ReasoningOrchestrator = struct {
         self.hierarchical_depth = depth;
     }
 
-    pub fn executeLocalPhase(self: *Self) !f64 {
-        var phase = ReasoningPhase.init(self.allocator, .local, self.fast_inner_steps, 1);
+    pub fn setProcessingLimits(self: *Self, perturb_nodes: usize, update_edges: usize, transform_nodes: usize) void {
+        self.perturb_node_limit = perturb_nodes;
+        self.update_edge_limit = update_edges;
+        self.transform_node_limit = transform_nodes;
+    }
+
+    fn allocatePhaseId(self: *Self) u64 {
+        const id = self.next_phase_id;
+        self.next_phase_id += 1;
+        return id;
+    }
+
+    fn executeLocalPhaseInternal(self: *Self, record: bool) !f64 {
+        var phase = ReasoningPhase.init(self.allocator, .local, self.fast_inner_steps, 1, self.allocatePhaseId());
         errdefer phase.deinit();
+
+        const initial_energy = self.computeGraphEnergy();
+        phase.previous_energy = initial_energy;
+        phase.current_energy = initial_energy;
 
         var iteration: usize = 0;
         while (iteration < self.fast_inner_steps) : (iteration += 1) {
@@ -196,26 +226,35 @@ pub const ReasoningOrchestrator = struct {
             try self.updateLocalEdges();
 
             const energy = self.computeGraphEnergy();
-            phase.current_energy = energy;
+            phase.updateEnergy(energy);
 
-            if (phase.hasConverged()) {
+            if (iteration > 0 and phase.hasConverged()) {
                 break;
             }
         }
 
         phase.finalize();
         const final_energy = phase.current_energy;
-        self.statistics.recordPhase(&phase);
-        try self.phase_history.append(phase);
+
+        if (record) {
+            self.statistics.recordPhase(&phase);
+            try self.phase_history.append(phase);
+        } else {
+            phase.deinit();
+        }
 
         return final_energy;
+    }
+
+    pub fn executeLocalPhase(self: *Self) !f64 {
+        return self.executeLocalPhaseInternal(true);
     }
 
     fn perturbLocalNodes(self: *Self) !void {
         var node_iter = self.graph.nodes.iterator();
         var count: usize = 0;
         while (node_iter.next()) |entry| {
-            if (count >= 10) break;
+            if (count >= self.perturb_node_limit) break;
             var node = entry.value_ptr;
             const perturbation = (self.esso.prng.random().float(f64) - 0.5) * 0.1;
             node.phase += perturbation;
@@ -237,10 +276,10 @@ pub const ReasoningOrchestrator = struct {
         var edge_iter = self.graph.edges.iterator();
         var count: usize = 0;
         while (edge_iter.next()) |entry| {
-            if (count >= 10) break;
+            if (count >= self.update_edge_limit) break;
             for (entry.value_ptr.items) |*edge| {
                 const delta = (self.esso.prng.random().float(f64) - 0.5) * 0.05;
-                edge.weight = @max(0.0, @min(1.0, edge.weight + delta));
+                edge.weight = std.math.clamp(edge.weight + delta, 0.0, 1.0);
                 const corr_delta = delta * 0.1;
                 edge.quantum_correlation.re += corr_delta;
                 edge.quantum_correlation.im += corr_delta * 0.5;
@@ -249,9 +288,13 @@ pub const ReasoningOrchestrator = struct {
         }
     }
 
-    pub fn executeGlobalPhase(self: *Self) !f64 {
-        var phase = ReasoningPhase.init(self.allocator, .global, self.fast_inner_steps, self.slow_outer_steps);
+    fn executeGlobalPhaseInternal(self: *Self, record: bool) !f64 {
+        var phase = ReasoningPhase.init(self.allocator, .global, self.fast_inner_steps, self.slow_outer_steps, self.allocatePhaseId());
         errdefer phase.deinit();
+
+        const initial_energy = self.computeGraphEnergy();
+        phase.previous_energy = initial_energy;
+        phase.current_energy = initial_energy;
 
         var outer_iteration: usize = 0;
         while (outer_iteration < self.slow_outer_steps) : (outer_iteration += 1) {
@@ -264,19 +307,28 @@ pub const ReasoningOrchestrator = struct {
             }
 
             const energy = self.computeGraphEnergy();
-            phase.current_energy = energy;
+            phase.updateEnergy(energy);
 
-            if (phase.hasConverged()) {
+            if (outer_iteration > 0 and phase.hasConverged()) {
                 break;
             }
         }
 
         phase.finalize();
         const final_energy = phase.current_energy;
-        self.statistics.recordPhase(&phase);
-        try self.phase_history.append(phase);
+
+        if (record) {
+            self.statistics.recordPhase(&phase);
+            try self.phase_history.append(phase);
+        } else {
+            phase.deinit();
+        }
 
         return final_energy;
+    }
+
+    pub fn executeGlobalPhase(self: *Self) !f64 {
+        return self.executeGlobalPhaseInternal(true);
     }
 
     fn transformSymmetryPatterns(self: *Self) !void {
@@ -287,7 +339,7 @@ pub const ReasoningOrchestrator = struct {
             var node_iter = self.graph.nodes.iterator();
             var count: usize = 0;
             while (node_iter.next()) |entry| {
-                if (count >= 5) break;
+                if (count >= self.transform_node_limit) break;
                 const node = entry.value_ptr;
                 const quantum_state = quantum.QuantumState{
                     .amplitude_real = node.qubit.a.re,
@@ -323,24 +375,29 @@ pub const ReasoningOrchestrator = struct {
                 for (entry.value_ptr.items) |*edge| {
                     const adjustment = (avg_dimension - edge.fractal_dimension) * 0.1;
                     edge.fractal_dimension += adjustment;
-                    edge.fractal_dimension = @max(1.0, @min(3.0, edge.fractal_dimension));
+                    edge.fractal_dimension = std.math.clamp(edge.fractal_dimension, 1.0, 3.0);
                 }
             }
         }
     }
 
     pub fn executeMetaPhase(self: *Self) !f64 {
-        var phase = ReasoningPhase.init(self.allocator, .meta, self.fast_inner_steps, self.slow_outer_steps);
+        var phase = ReasoningPhase.init(self.allocator, .meta, self.fast_inner_steps, self.slow_outer_steps, self.allocatePhaseId());
         errdefer phase.deinit();
+
+        const initial_energy = self.computeGraphEnergy();
+        phase.previous_energy = initial_energy;
+        phase.current_energy = initial_energy;
 
         var depth: usize = 0;
         while (depth < self.hierarchical_depth) : (depth += 1) {
-            const local_energy = try self.executeLocalPhase();
-            const global_energy = try self.executeGlobalPhase();
+            const local_energy = try self.executeLocalPhaseInternal(false);
+            const global_energy = try self.executeGlobalPhaseInternal(false);
 
-            phase.current_energy = (local_energy + global_energy) / 2.0;
+            const composite = (local_energy + global_energy) / 2.0;
+            phase.updateEnergy(composite);
 
-            if (phase.hasConverged()) {
+            if (depth > 0 and phase.hasConverged()) {
                 break;
             }
         }
@@ -382,6 +439,7 @@ pub const ReasoningOrchestrator = struct {
     pub fn runHierarchicalReasoning(self: *Self, max_cycles: usize) !f64 {
         var cycle: usize = 0;
         var best_energy: f64 = std.math.inf(f64);
+        var prev_combined: f64 = std.math.inf(f64);
 
         while (cycle < max_cycles) : (cycle += 1) {
             const local_e = try self.executeLocalPhase();
@@ -392,6 +450,15 @@ pub const ReasoningOrchestrator = struct {
             if (combined < best_energy) {
                 best_energy = combined;
             }
+
+            if (cycle > 0) {
+                const delta = @abs(combined - prev_combined);
+                const denom = @max(@abs(prev_combined), 1.0);
+                if ((delta / denom) < 1e-6) {
+                    break;
+                }
+            }
+            prev_combined = combined;
 
             if (combined < 0.01) {
                 break;
