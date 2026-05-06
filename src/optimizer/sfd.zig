@@ -5,12 +5,12 @@ const core_types = @import("../core/types.zig");
 const core_tensor = @import("../core/tensor.zig");
 const core_memory = @import("../core/memory.zig");
 
-var global_prng_counter: u64 = 0;
+var global_prng_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
 fn nextSeed() u64 {
-    global_prng_counter +%= 1;
+    const c = global_prng_counter.fetchAdd(1, .monotonic) +% 1;
     const now: u64 = @bitCast(std.time.microTimestamp());
-    return std.hash.Wyhash.hash(global_prng_counter, std.mem.asBytes(&now));
+    return std.hash.Wyhash.hash(c, std.mem.asBytes(&now));
 }
 
 fn shapesEqual(a: Shape, b: Shape) bool {
@@ -26,14 +26,42 @@ fn quantizeValue(value: f32, precision: Precision) f32 {
     if (!std.math.isFinite(value)) return value;
     return switch (precision) {
         .fp4 => blk: {
-            const clamped = std.math.clamp(value, -8.0, 7.0);
-            break :blk @round(clamped * 2.0) / 2.0;
+            const clamped = std.math.clamp(value, -6.0, 6.0);
+            const abs_v = if (clamped < 0) -clamped else clamped;
+            const sign: f32 = if (clamped < 0) -1.0 else 1.0;
+            const levels = [_]f32{ 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0 };
+            var best: f32 = levels[0];
+            var best_dist: f32 = abs_v;
+            for (levels[1..]) |lv| {
+                const d = if (abs_v > lv) abs_v - lv else lv - abs_v;
+                if (d < best_dist) {
+                    best_dist = d;
+                    best = lv;
+                }
+            }
+            break :blk sign * best;
         },
         .fp8 => blk: {
             const clamped = std.math.clamp(value, -448.0, 448.0);
-            break :blk @round(clamped * 16.0) / 16.0;
+            if (clamped == 0.0) break :blk 0.0;
+            const sign: f32 = if (clamped < 0) -1.0 else 1.0;
+            const abs_v = if (clamped < 0) -clamped else clamped;
+            const exp_f = @floor(@log2(abs_v));
+            const exp_clamped = std.math.clamp(exp_f, -9.0, 8.0);
+            const step = std.math.pow(f32, 2.0, exp_clamped - 3.0);
+            const quantized = @round(abs_v / step) * step;
+            break :blk sign * std.math.clamp(quantized, 0.0, 448.0);
         },
-        .fp16 => @round(value * 1024.0) / 1024.0,
+        .fp16 => blk: {
+            const clamped = std.math.clamp(value, -65504.0, 65504.0);
+            if (clamped == 0.0) break :blk 0.0;
+            const abs_v = if (clamped < 0) -clamped else clamped;
+            const sign: f32 = if (clamped < 0) -1.0 else 1.0;
+            const exp_f = @floor(@log2(abs_v));
+            const exp_clamped = std.math.clamp(exp_f, -24.0, 15.0);
+            const step = std.math.pow(f32, 2.0, exp_clamped - 10.0);
+            break :blk sign * (@round(abs_v / step) * step);
+        },
         .fp32, .fp64 => value,
     };
 }
@@ -82,6 +110,7 @@ pub const Shape = struct {
     pub fn totalSize(self: Shape) usize {
         var size: usize = 1;
         for (self.dims) |dim| {
+            if (dim != 0 and size > std.math.maxInt(usize) / dim) @panic("Shape.totalSize overflow");
             size *= dim;
         }
         return size;
@@ -102,6 +131,9 @@ pub const Tensor = struct {
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, dims: []const usize) !Tensor {
+        for (dims) |d| {
+            if (d == 0) return error.InvalidShape;
+        }
         const owned_dims = try allocator.dupe(usize, dims);
         errdefer allocator.free(owned_dims);
 
@@ -120,20 +152,20 @@ pub const Tensor = struct {
 
     pub fn zeros(allocator: Allocator, dims: []const usize) !Tensor {
         var tensor = try init(allocator, dims);
-        try tensor.fill(0.0);
+        tensor.fill(0.0);
         return tensor;
     }
 
     pub fn ones(allocator: Allocator, dims: []const usize) !Tensor {
         var tensor = try init(allocator, dims);
-        try tensor.fill(1.0);
+        tensor.fill(1.0);
         return tensor;
     }
 
     pub fn eye(allocator: Allocator, dims: []const usize) !Tensor {
         if (dims.len != 2 or dims[0] != dims[1]) return error.InvalidShape;
         var tensor = try init(allocator, dims);
-        try tensor.fill(0.0);
+        tensor.fill(0.0);
         const n = dims[0];
         var i: usize = 0;
         while (i < n) : (i += 1) {
@@ -147,25 +179,34 @@ pub const Tensor = struct {
         self.allocator.free(self.shape.dims);
     }
 
-    pub fn fill(self: *Tensor, value: f32) !void {
+    pub fn fill(self: *Tensor, value: f32) void {
         for (self.data) |*v| {
             v.* = value;
         }
     }
 
-    pub fn fillRandomNormal(self: *Tensor, mean: f32, std_dev: f32) !void {
+    pub fn fillRandomNormal(self: *Tensor, mean: f32, std_dev: f32) void {
         var prng = std.Random.DefaultPrng.init(nextSeed());
         const random = prng.random();
 
-        for (self.data) |*v| {
+        var i: usize = 0;
+        while (i + 1 < self.data.len) : (i += 2) {
+            const rand_u = @max(random.float(f32), 1e-7);
+            const rand_v = random.float(f32);
+            const r = @sqrt(-2.0 * @log(rand_u));
+            const theta = 2.0 * std.math.pi * rand_v;
+            self.data[i] = mean + std_dev * r * @cos(theta);
+            self.data[i + 1] = mean + std_dev * r * @sin(theta);
+        }
+        if (i < self.data.len) {
             const rand_u = @max(random.float(f32), 1e-7);
             const rand_v = random.float(f32);
             const z0 = @sqrt(-2.0 * @log(rand_u)) * @cos(2.0 * std.math.pi * rand_v);
-            v.* = mean + std_dev * z0;
+            self.data[i] = mean + std_dev * z0;
         }
     }
 
-    pub fn fillRademacher(self: *Tensor) !void {
+    pub fn fillRademacher(self: *Tensor) void {
         var prng = std.Random.DefaultPrng.init(nextSeed());
         const random = prng.random();
 
@@ -179,13 +220,15 @@ pub const Tensor = struct {
         @memcpy(new_tensor.data, self.data);
         new_tensor.dtype = self.dtype;
         new_tensor.flags = self.flags;
+        new_tensor.flags.in_tensor_memory = false;
         return new_tensor;
     }
 
     pub fn copyFrom(self: *Tensor, other: *const Tensor) !void {
         if (!shapesEqual(self.shape, other.shape)) return error.ShapeMismatch;
         @memcpy(self.data, other.data);
-        self.flags = other.flags;
+        self.flags.requires_grad = other.flags.requires_grad;
+        self.flags.is_compressed = other.flags.is_compressed;
         self.dtype = other.dtype;
     }
 
@@ -196,11 +239,10 @@ pub const Tensor = struct {
             self.data[i] = quantizeValue(other.data[i], self.dtype);
         }
         self.flags.requires_grad = other.flags.requires_grad;
-        self.flags.in_tensor_memory = other.flags.in_tensor_memory;
         self.flags.is_compressed = self.dtype == .fp4 or self.dtype == .fp8;
     }
 
-    pub fn mulScalar(self: *Tensor, scalar: f32) !void {
+    pub fn mulScalar(self: *Tensor, scalar: f32) void {
         for (self.data) |*v| {
             v.* *= scalar;
         }
@@ -225,6 +267,7 @@ pub const Tensor = struct {
     pub fn normL2(self: *const Tensor) f32 {
         var sum: f64 = 0.0;
         for (self.data) |v| {
+            if (std.math.isNan(v)) return std.math.nan(f32);
             if (!std.math.isFinite(v)) return std.math.inf(f32);
             sum += @as(f64, v) * @as(f64, v);
         }
@@ -239,16 +282,16 @@ pub const Tensor = struct {
 
         var v = try Tensor.init(allocator, &[_]usize{n});
         defer v.deinit();
-        try v.fillRandomNormal(0.0, 1.0);
+        v.fillRandomNormal(0.0, 1.0);
 
         var u = try Tensor.init(allocator, &[_]usize{m});
         defer u.deinit();
-        try u.fill(0.0);
+        u.fill(0.0);
 
         const effective_iter = if (max_iter == 0) @as(usize, 1) else max_iter;
         var iter: usize = 0;
         while (iter < effective_iter) : (iter += 1) {
-            try u.fill(0.0);
+            u.fill(0.0);
             var i: usize = 0;
             while (i < m) : (i += 1) {
                 var j: usize = 0;
@@ -259,10 +302,10 @@ pub const Tensor = struct {
 
             const u_norm = u.normL2();
             if (std.math.isFinite(u_norm) and u_norm > eps) {
-                try u.mulScalar(1.0 / u_norm);
+                u.mulScalar(1.0 / u_norm);
             }
 
-            try v.fill(0.0);
+            v.fill(0.0);
             i = 0;
             while (i < m) : (i += 1) {
                 var j: usize = 0;
@@ -273,20 +316,21 @@ pub const Tensor = struct {
 
             const v_norm = v.normL2();
             if (std.math.isFinite(v_norm) and v_norm > eps) {
-                try v.mulScalar(1.0 / v_norm);
+                v.mulScalar(1.0 / v_norm);
             }
         }
 
-        var sigma: f32 = 0.0;
+        var sigma: f64 = 0.0;
         var i: usize = 0;
         while (i < m) : (i += 1) {
             var j: usize = 0;
             while (j < n) : (j += 1) {
-                sigma += u.data[i] * self.data[i * n + j] * v.data[j];
+                sigma += @as(f64, u.data[i]) * @as(f64, self.data[i * n + j]) * @as(f64, v.data[j]);
             }
         }
 
-        return if (sigma >= 0) sigma else -sigma;
+        const sigma_f32: f32 = @floatCast(sigma);
+        return if (sigma_f32 >= 0) sigma_f32 else -sigma_f32;
     }
 
     pub fn matmul(self: *Tensor, A: *const Tensor, B: *const Tensor) !void {
@@ -308,18 +352,18 @@ pub const Tensor = struct {
             return;
         }
 
-        try self.fill(0.0);
+        self.fill(0.0);
 
         var i: usize = 0;
         while (i < m) : (i += 1) {
             var j: usize = 0;
             while (j < n) : (j += 1) {
-                var sum: f32 = 0.0;
+                var sum: f64 = 0.0;
                 var p: usize = 0;
                 while (p < k) : (p += 1) {
-                    sum += A.data[i * k + p] * B.data[p * n + j];
+                    sum += @as(f64, A.data[i * k + p]) * @as(f64, B.data[p * n + j]);
                 }
-                self.data[i * n + j] = sum;
+                self.data[i * n + j] = @floatCast(sum);
             }
         }
     }
@@ -374,7 +418,7 @@ pub const Tensor = struct {
         const dtype_raw = try reader.readInt(u8, .little);
         const flags_raw = try reader.readInt(u8, .little);
         const ndims_u64 = try reader.readInt(u64, .little);
-        if (ndims_u64 > std.math.maxInt(usize)) return error.InvalidShape;
+        if (ndims_u64 > @as(u64, std.math.maxInt(usize))) return error.InvalidShape;
         const ndims: usize = @intCast(ndims_u64);
         var dims = try allocator.alloc(usize, ndims);
         errdefer allocator.free(dims);
@@ -382,7 +426,7 @@ pub const Tensor = struct {
         var i: usize = 0;
         while (i < ndims) : (i += 1) {
             const dim_u64 = try reader.readInt(u64, .little);
-            if (dim_u64 > std.math.maxInt(usize)) return error.InvalidShape;
+            if (dim_u64 > @as(u64, std.math.maxInt(usize))) return error.InvalidShape;
             dims[i] = @intCast(dim_u64);
         }
 
@@ -443,17 +487,23 @@ pub const SFDConfig = struct {
     warmup_steps: usize = 10,
     finite_diff_eps: f32 = 1e-5,
     second_order_eps: f32 = 1e-4,
+    use_external_fisher: bool = false,
 };
 
 pub const KFACBlock = struct {
     A_inv: Tensor,
     G_inv: Tensor,
     damping: f32,
+    alpha: f32,
     update_freq: usize,
     last_update: usize,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, input_dim: usize, output_dim: usize, damping: f32) !KFACBlock {
+        return initWithAlpha(allocator, input_dim, output_dim, damping, 0.95);
+    }
+
+    pub fn initWithAlpha(allocator: Allocator, input_dim: usize, output_dim: usize, damping: f32, alpha: f32) !KFACBlock {
         const A_shape = [_]usize{ input_dim, input_dim };
         const G_shape = [_]usize{ output_dim, output_dim };
 
@@ -467,6 +517,7 @@ pub const KFACBlock = struct {
             .A_inv = A,
             .G_inv = G,
             .damping = damping,
+            .alpha = alpha,
             .update_freq = 10,
             .last_update = 0,
             .allocator = allocator,
@@ -479,7 +530,6 @@ pub const KFACBlock = struct {
     }
 
     pub fn updateStatistics(self: *KFACBlock, activations: *const Tensor, gradients: *const Tensor) !void {
-        const alpha: f32 = 0.95;
         const a_dim = self.A_inv.shape.dims[0];
         const g_dim = self.G_inv.shape.dims[0];
 
@@ -488,8 +538,11 @@ pub const KFACBlock = struct {
             var col: usize = 0;
             while (col < a_dim) : (col += 1) {
                 const idx = row * a_dim + col;
-                const target = if (row == col and row < activations.data.len) activations.data[row] * activations.data[row] + self.damping else 0.0;
-                self.A_inv.data[idx] = alpha * self.A_inv.data[idx] + (1.0 - alpha) * target;
+                const a_r: f32 = if (row < activations.data.len) activations.data[row] else 0.0;
+                const a_c: f32 = if (col < activations.data.len) activations.data[col] else 0.0;
+                const diag_term: f32 = if (row == col) self.damping else 0.0;
+                const target = a_r * a_c + diag_term;
+                self.A_inv.data[idx] = self.alpha * self.A_inv.data[idx] + (1.0 - self.alpha) * target;
             }
         }
 
@@ -498,8 +551,11 @@ pub const KFACBlock = struct {
             var col: usize = 0;
             while (col < g_dim) : (col += 1) {
                 const idx = row * g_dim + col;
-                const target = if (row == col and row < gradients.data.len) gradients.data[row] * gradients.data[row] + self.damping else 0.0;
-                self.G_inv.data[idx] = alpha * self.G_inv.data[idx] + (1.0 - alpha) * target;
+                const g_r: f32 = if (row < gradients.data.len) gradients.data[row] else 0.0;
+                const g_c: f32 = if (col < gradients.data.len) gradients.data[col] else 0.0;
+                const diag_term: f32 = if (row == col) self.damping else 0.0;
+                const target = g_r * g_c + diag_term;
+                self.G_inv.data[idx] = self.alpha * self.G_inv.data[idx] + (1.0 - self.alpha) * target;
             }
         }
     }
@@ -511,23 +567,24 @@ pub const KFACBlock = struct {
         var G_inv_sqrt = try self.computeInverseSqrt(&self.G_inv);
         defer G_inv_sqrt.deinit();
 
-        if (grad.shape.dims.len == 2 and grad.shape.dims[0] == self.G_inv.shape.dims[0] and grad.shape.dims[1] == self.A_inv.shape.dims[0]) {
+        const g_dim = self.G_inv.shape.dims[0];
+        const a_dim = self.A_inv.shape.dims[0];
+
+        if (grad.shape.dims.len == 2 and grad.shape.dims[0] == g_dim and grad.shape.dims[1] == a_dim) {
             var original = try grad.clone(self.allocator);
             defer original.deinit();
             var i: usize = 0;
             while (i < grad.shape.dims[0]) : (i += 1) {
                 var j: usize = 0;
                 while (j < grad.shape.dims[1]) : (j += 1) {
-                    const left_scale = G_inv_sqrt.data[i * grad.shape.dims[0] + i];
-                    const right_scale = A_inv_sqrt.data[j * grad.shape.dims[1] + j];
+                    const left_scale = G_inv_sqrt.data[i * g_dim + i];
+                    const right_scale = A_inv_sqrt.data[j * a_dim + j];
                     grad.data[i * grad.shape.dims[1] + j] = original.data[i * grad.shape.dims[1] + j] * left_scale * right_scale;
                 }
             }
             return;
         }
 
-        const a_dim = self.A_inv.shape.dims[0];
-        const g_dim = self.G_inv.shape.dims[0];
         var idx: usize = 0;
         while (idx < grad.data.len) : (idx += 1) {
             const left_idx = idx % g_dim;
@@ -542,7 +599,7 @@ pub const KFACBlock = struct {
         if (M.shape.dims.len != 2 or M.shape.dims[0] != M.shape.dims[1]) return error.InvalidShape;
         var result = try Tensor.init(self.allocator, M.shape.dims);
         errdefer result.deinit();
-        try result.fill(0.0);
+        result.fill(0.0);
 
         const n = M.shape.dims[0];
         var i: usize = 0;
@@ -553,6 +610,12 @@ pub const KFACBlock = struct {
 
         return result;
     }
+};
+
+pub const SpectralNormalizerConfig = struct {
+    power_iterations: usize = 20,
+    eps: f32 = 1e-12,
+    max_singular_value: f32 = 1.0,
 };
 
 pub const SpectralNormalizer = struct {
@@ -568,11 +631,19 @@ pub const SpectralNormalizer = struct {
         };
     }
 
+    pub fn initWithConfig(config: SpectralNormalizerConfig) SpectralNormalizer {
+        return SpectralNormalizer{
+            .power_iterations = config.power_iterations,
+            .eps = config.eps,
+            .max_singular_value = config.max_singular_value,
+        };
+    }
+
     pub fn normalizeWeights(self: *SpectralNormalizer, weights: *Tensor, allocator: Allocator) !void {
         const sigma = try weights.spectralNorm(allocator, self.power_iterations, self.eps);
 
         if (sigma > self.max_singular_value) {
-            try weights.mulScalar(self.max_singular_value / sigma);
+            weights.mulScalar(self.max_singular_value / sigma);
         }
     }
 
@@ -585,6 +656,12 @@ pub const SpectralNormalizer = struct {
 
         return loss + lambda * reg_term;
     }
+};
+
+pub const GradientFlowConfig = struct {
+    gradient_clip_norm: f32 = 1.0,
+    use_normalized_gradient_flow: bool = true,
+    spectral_power_iterations: usize = 20,
 };
 
 pub const GradientFlowController = struct {
@@ -600,6 +677,14 @@ pub const GradientFlowController = struct {
         };
     }
 
+    pub fn initWithConfig(config: GradientFlowConfig) GradientFlowController {
+        return GradientFlowController{
+            .spectral_normalizer = SpectralNormalizer.init(config.spectral_power_iterations),
+            .gradient_clip_norm = config.gradient_clip_norm,
+            .use_normalized_gradient_flow = config.use_normalized_gradient_flow,
+        };
+    }
+
     pub fn stabilizeGradients(self: *GradientFlowController, gradients: []*Tensor, weights: []*Tensor, allocator: Allocator) !void {
         for (weights) |w| {
             try self.spectral_normalizer.normalizeWeights(w, allocator);
@@ -610,34 +695,40 @@ pub const GradientFlowController = struct {
                 const norm = grad.normL2();
                 if (norm > self.gradient_clip_norm) {
                     const scale = self.gradient_clip_norm / (norm + 1e-8);
-                    try grad.mulScalar(scale);
+                    grad.mulScalar(scale);
+                }
+            }
+
+            for (gradients) |grad| {
+                if (grad.data.len == 0) continue;
+
+                var mean: f32 = 0.0;
+                var variance: f32 = 0.0;
+
+                for (grad.data) |g| {
+                    mean += g;
+                }
+                mean /= @as(f32, @floatFromInt(grad.data.len));
+
+                for (grad.data) |g| {
+                    const diff = g - mean;
+                    variance += diff * diff;
+                }
+                variance /= @as(f32, @floatFromInt(grad.data.len));
+
+                const std_dev = @sqrt(variance + 1e-8);
+                for (grad.data) |*g| {
+                    g.* = (g.* - mean) / std_dev;
                 }
             }
         }
-
-        for (gradients) |grad| {
-            if (grad.data.len == 0) continue;
-
-            var mean: f32 = 0.0;
-            var variance: f32 = 0.0;
-
-            for (grad.data) |g| {
-                mean += g;
-            }
-            mean /= @as(f32, @floatFromInt(grad.data.len));
-
-            for (grad.data) |g| {
-                const diff = g - mean;
-                variance += diff * diff;
-            }
-            variance /= @as(f32, @floatFromInt(grad.data.len));
-
-            const std_dev = @sqrt(variance + 1e-8);
-            for (grad.data) |*g| {
-                g.* = (g.* - mean) / std_dev;
-            }
-        }
     }
+};
+
+pub const MARSConfig = struct {
+    snapshot_freq: usize = 100,
+    scale_factor: f32 = 1.0,
+    momentum: f32 = 0.9,
 };
 
 pub const MARSVarianceReducer = struct {
@@ -647,7 +738,7 @@ pub const MARSVarianceReducer = struct {
     momentum: f32,
     allocator: Allocator,
 
-    pub fn init(allocator: Allocator, param_shapes: []const []const usize) !MARSVarianceReducer {
+    pub fn init(allocator: Allocator, param_shapes: []const []const usize, config: MARSConfig) !MARSVarianceReducer {
         var ref_grads = try allocator.alloc(Tensor, param_shapes.len);
         errdefer allocator.free(ref_grads);
 
@@ -663,15 +754,15 @@ pub const MARSVarianceReducer = struct {
         while (i < param_shapes.len) : (i += 1) {
             const shape = param_shapes[i];
             ref_grads[i] = try Tensor.init(allocator, shape);
-            try ref_grads[i].fill(0.0);
+            ref_grads[i].fill(0.0);
             initialized += 1;
         }
 
         return MARSVarianceReducer{
             .reference_gradients = ref_grads,
-            .snapshot_freq = 100,
-            .scale_factor = 1.0,
-            .momentum = 0.9,
+            .snapshot_freq = config.snapshot_freq,
+            .scale_factor = config.scale_factor,
+            .momentum = config.momentum,
             .allocator = allocator,
         };
     }
@@ -699,14 +790,16 @@ pub const MARSVarianceReducer = struct {
 
             g.* = g_current - reference_grad.data[i] + g_ref;
             g.* = self.momentum * g.* + (1.0 - self.momentum) * g_current;
+            g.* *= self.scale_factor;
         }
 
         return vr_grad;
     }
 
     pub fn updateReferenceGradients(self: *MARSVarianceReducer, full_batch_gradients: []const Tensor) !void {
+        if (full_batch_gradients.len != self.reference_gradients.len) return error.GradientCountMismatch;
         var i: usize = 0;
-        while (i < full_batch_gradients.len and i < self.reference_gradients.len) : (i += 1) {
+        while (i < full_batch_gradients.len) : (i += 1) {
             const grad = full_batch_gradients[i];
             if (!shapesEqual(self.reference_gradients[i].shape, grad.shape)) return error.ShapeMismatch;
             @memcpy(self.reference_gradients[i].data, grad.data);
@@ -717,6 +810,7 @@ pub const MARSVarianceReducer = struct {
 pub const ReversibleOptimizerState = struct {
     forward_cache_policy: CachePolicy,
     recompute_threshold: f32,
+    available_memory_bytes: f32,
     jacobian_cache: std.AutoHashMap(usize, Tensor),
     allocator: Allocator,
 
@@ -730,6 +824,7 @@ pub const ReversibleOptimizerState = struct {
         return ReversibleOptimizerState{
             .forward_cache_policy = .adaptive,
             .recompute_threshold = 0.5,
+            .available_memory_bytes = 1024.0 * 1024.0 * 1024.0,
             .jacobian_cache = std.AutoHashMap(usize, Tensor).init(allocator),
             .allocator = allocator,
         };
@@ -745,15 +840,12 @@ pub const ReversibleOptimizerState = struct {
     }
 
     pub fn shouldRecompute(self: *ReversibleOptimizerState, layer_idx: usize, computation_cost: f32, memory_cost: f32, available_memory: f32) bool {
-        _ = layer_idx;
-
         switch (self.forward_cache_policy) {
             .cache_all => return false,
             .recompute_all => return true,
             .adaptive => {
-                if (available_memory < memory_cost) {
-                    return true;
-                }
+                if (self.jacobian_cache.contains(layer_idx)) return false;
+                if (available_memory < memory_cost) return true;
 
                 const recompute_cost = computation_cost;
                 const cache_cost = memory_cost * self.recompute_threshold;
@@ -786,7 +878,13 @@ pub const ReversibleOptimizerState = struct {
         while (i > 0) : (i -= 1) {
             const layer_idx = i - 1;
 
-            const should_recomp = self.shouldRecompute(layer_idx, 1.0, @as(f32, @floatFromInt(forward_outputs[layer_idx].sizeBytes())), 1024.0 * 1024.0 * 1024.0);
+            const mem_bytes: f32 = @floatFromInt(forward_outputs[layer_idx].sizeBytes());
+            const cached_count_f: f32 = @floatFromInt(self.jacobian_cache.count());
+            const cached_size: f32 = cached_count_f * mem_bytes;
+            const available: f32 = @max(0.0, self.available_memory_bytes - cached_size);
+            const comp_cost: f32 = mem_bytes / (1024.0 * 1024.0);
+
+            const should_recomp = self.shouldRecompute(layer_idx, comp_cost, mem_bytes, available);
 
             if (should_recomp) {
                 var reconstructed_input = try self.reverseLayer(&forward_outputs[layer_idx], layer_idx);
@@ -825,23 +923,21 @@ pub const ReversibleOptimizerState = struct {
     }
 
     fn computeResidual(self: *ReversibleOptimizerState, input: *const Tensor, layer_idx: usize) !Tensor {
-        _ = layer_idx;
-        var residual = try input.clone(self.allocator);
-        try residual.mulScalar(0.1);
+        if (self.jacobian_cache.get(layer_idx)) |cached| {
+            if (shapesEqual(input.shape, cached.shape)) {
+                var residual = try input.clone(self.allocator);
+                errdefer residual.deinit();
+                try residual.sub(&cached);
+                return residual;
+            }
+        }
+        var residual = try Tensor.zeros(self.allocator, input.shape.dims);
         return residual;
     }
 
     fn computeGradient(self: *ReversibleOptimizerState, input: *const Tensor, grad_output: *const Tensor) !Tensor {
-        _ = self;
-        if (!shapesEqual(input.shape, grad_output.shape)) return error.ShapeMismatch;
-        var grad_input = try input.clone(input.allocator);
-
-        var i: usize = 0;
-        while (i < grad_input.data.len) : (i += 1) {
-            const g = &grad_input.data[i];
-            g.* = grad_output.data[i];
-        }
-
+        _ = input;
+        const grad_input = try grad_output.clone(self.allocator);
         return grad_input;
     }
 };
@@ -878,68 +974,106 @@ pub const LRScheduler = struct {
         };
     }
 
+    fn selectOMedian(hess_values: []f32) f32 {
+        if (hess_values.len == 0) return 0.0;
+        if (hess_values.len == 1) return hess_values[0];
+        const target = hess_values.len / 2;
+        var lo: usize = 0;
+        var hi: usize = hess_values.len - 1;
+        while (lo < hi) {
+            const pivot = hess_values[(lo + hi) / 2];
+            var i2 = lo;
+            var j2 = hi;
+            while (i2 <= j2) {
+                while (hess_values[i2] < pivot) i2 += 1;
+                while (hess_values[j2] > pivot) {
+                    if (j2 == 0) break;
+                    j2 -= 1;
+                }
+                if (i2 <= j2) {
+                    const tmp = hess_values[i2];
+                    hess_values[i2] = hess_values[j2];
+                    hess_values[j2] = tmp;
+                    i2 += 1;
+                    if (j2 == 0) break;
+                    j2 -= 1;
+                }
+            }
+            if (target <= j2) {
+                hi = j2;
+            } else if (target >= i2) {
+                lo = i2;
+            } else {
+                break;
+            }
+        }
+        return hess_values[target];
+    }
+
     pub fn getLearningRate(self: *LRScheduler, hessian_info: ?*const Tensor) !f32 {
-        var lr = self.base_lr;
         const decay_steps = if (self.total_steps > self.warmup_steps) self.total_steps - self.warmup_steps else 1;
 
         if (self.warmup_steps > 0 and self.current_step < self.warmup_steps) {
             const warmup_progress = @as(f32, @floatFromInt(self.current_step)) / @as(f32, @floatFromInt(self.warmup_steps));
-            lr = self.base_lr * warmup_progress;
-        } else {
-            switch (self.schedule_type) {
-                .cosine_annealing => {
-                    const progress = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps))) / @as(f32, @floatFromInt(decay_steps));
-                    lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1.0 + @cos(std.math.pi * progress));
-                },
-                .cosine_annealing_with_warmup => {
-                    const progress = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps))) / @as(f32, @floatFromInt(decay_steps));
-                    lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1.0 + @cos(std.math.pi * progress));
-                },
-                .polynomial_decay => {
-                    const progress = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps))) / @as(f32, @floatFromInt(decay_steps));
-                    const power: f32 = 2.0;
-                    lr = self.base_lr * std.math.pow(f32, @max(0.0, 1.0 - progress), power);
-                },
-                .exponential_decay => {
-                    const decay_rate: f32 = 0.96;
-                    const decay_interval: f32 = 1000.0;
-                    const steps_since_warmup = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps)));
-                    lr = self.base_lr * std.math.pow(f32, decay_rate, steps_since_warmup / decay_interval);
-                },
-                .one_cycle => {
-                    const mid_point = @max(self.warmup_steps + 1, self.total_steps / 2);
-                    if (self.current_step < mid_point) {
-                        const rise_steps = @max(@as(usize, 1), mid_point - self.warmup_steps);
-                        const progress = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps))) / @as(f32, @floatFromInt(rise_steps));
-                        lr = self.base_lr + (self.max_lr - self.base_lr) * progress;
-                    } else {
-                        const fall_steps = @max(@as(usize, 1), self.total_steps - mid_point);
-                        const progress = @as(f32, @floatFromInt(self.current_step - mid_point)) / @as(f32, @floatFromInt(fall_steps));
-                        lr = self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (1.0 + @cos(std.math.pi * progress));
-                    }
-                },
-                .sophia_style => {
-                    if (hessian_info) |hess| {
-                        if (hess.data.len == 0) {
-                            lr = self.base_lr;
-                        } else {
-                            const hess_values = try self.allocator.alloc(f32, hess.data.len);
-                            defer self.allocator.free(hess_values);
-                            @memcpy(hess_values, hess.data);
-                            std.mem.sort(f32, hess_values, {}, comptime std.sort.asc(f32));
-                            const median_hess = hess_values[hess_values.len / 2];
-                            lr = self.base_lr / @sqrt(@max(median_hess, 1e-8));
-                            lr = std.math.clamp(lr, self.min_lr, self.max_lr);
-                        }
-                    } else {
-                        lr = self.base_lr;
-                    }
-                },
-            }
+            return self.base_lr * warmup_progress;
         }
 
-        self.current_step += 1;
+        var lr = self.base_lr;
+        switch (self.schedule_type) {
+            .cosine_annealing, .cosine_annealing_with_warmup => {
+                const progress = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps))) / @as(f32, @floatFromInt(decay_steps));
+                const p = @min(progress, 1.0);
+                lr = self.min_lr + (self.base_lr - self.min_lr) * 0.5 * (1.0 + @cos(std.math.pi * p));
+            },
+            .polynomial_decay => {
+                const progress = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps))) / @as(f32, @floatFromInt(decay_steps));
+                const p = @min(progress, 1.0);
+                const power: f32 = 2.0;
+                lr = self.base_lr * std.math.pow(f32, @max(0.0, 1.0 - p), power);
+            },
+            .exponential_decay => {
+                const decay_rate: f32 = 0.96;
+                const decay_interval: f32 = 1000.0;
+                const steps_since_warmup = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps)));
+                lr = self.base_lr * std.math.pow(f32, decay_rate, steps_since_warmup / decay_interval);
+            },
+            .one_cycle => {
+                const mid_point = @max(self.warmup_steps +| 1, self.total_steps / 2);
+                if (self.current_step < mid_point) {
+                    const rise_steps = @max(@as(usize, 1), mid_point - self.warmup_steps);
+                    const progress = @as(f32, @floatFromInt(self.current_step - @min(self.current_step, self.warmup_steps))) / @as(f32, @floatFromInt(rise_steps));
+                    const p = @min(progress, 1.0);
+                    lr = self.base_lr + (self.max_lr - self.base_lr) * p;
+                } else {
+                    const fall_steps = @max(@as(usize, 1), if (self.total_steps > mid_point) self.total_steps - mid_point else 1);
+                    const progress = @as(f32, @floatFromInt(self.current_step - mid_point)) / @as(f32, @floatFromInt(fall_steps));
+                    const p = @min(progress, 1.0);
+                    lr = self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (1.0 + @cos(std.math.pi * p));
+                }
+            },
+            .sophia_style => {
+                if (hessian_info) |hess| {
+                    if (hess.data.len == 0) {
+                        lr = self.base_lr;
+                    } else {
+                        const hess_values = try self.allocator.alloc(f32, hess.data.len);
+                        defer self.allocator.free(hess_values);
+                        @memcpy(hess_values, hess.data);
+                        const median_hess = selectOMedian(hess_values);
+                        lr = self.base_lr / @sqrt(@max(median_hess, 1e-8));
+                        lr = std.math.clamp(lr, self.min_lr, self.max_lr);
+                    }
+                } else {
+                    lr = self.base_lr;
+                }
+            },
+        }
+
         return std.math.clamp(lr, self.min_lr, self.max_lr);
+    }
+
+    pub fn step(self: *LRScheduler) void {
+        self.current_step +|= 1;
     }
 };
 
@@ -950,6 +1084,7 @@ pub const MixedPrecisionConfig = struct {
     master_weights_precision: Precision = .fp32,
     gradient_accumulation_steps: usize = 4,
     loss_scale: f32 = 1024.0,
+    max_loss_scale: f32 = 65536.0,
     dynamic_loss_scaling: bool = true,
 };
 
@@ -959,14 +1094,20 @@ pub const DynamicLossScaler = struct {
     backoff_factor: f32,
     growth_interval: usize,
     steps_since_last_overflow: usize,
+    max_scale: f32,
 
     pub fn init(initial_scale: f32) DynamicLossScaler {
+        return initWithMaxScale(initial_scale, 65536.0);
+    }
+
+    pub fn initWithMaxScale(initial_scale: f32, max_scale: f32) DynamicLossScaler {
         return DynamicLossScaler{
             .scale = initial_scale,
             .growth_factor = 2.0,
             .backoff_factor = 0.5,
             .growth_interval = 2000,
             .steps_since_last_overflow = 0,
+            .max_scale = max_scale,
         };
     }
 
@@ -993,7 +1134,7 @@ pub const DynamicLossScaler = struct {
             }
         }
 
-        self.scale = std.math.clamp(self.scale, 1.0, 65536.0);
+        self.scale = std.math.clamp(self.scale, 1.0, self.max_scale);
     }
 };
 
@@ -1016,12 +1157,20 @@ pub const MixedPrecisionTrainer = struct {
         var accum_g = try allocator.alloc(Tensor, weight_shapes.len);
         errdefer allocator.free(accum_g);
 
-        var initialized: usize = 0;
+        var init_master: usize = 0;
+        var init_working: usize = 0;
+        var init_accum: usize = 0;
         errdefer {
             var idx: usize = 0;
-            while (idx < initialized) : (idx += 1) {
+            while (idx < init_master) : (idx += 1) {
                 master_w[idx].deinit();
+            }
+            idx = 0;
+            while (idx < init_working) : (idx += 1) {
                 working_w[idx].deinit();
+            }
+            idx = 0;
+            while (idx < init_accum) : (idx += 1) {
                 accum_g[idx].deinit();
             }
         }
@@ -1031,16 +1180,18 @@ pub const MixedPrecisionTrainer = struct {
             const shape = weight_shapes[i];
             master_w[i] = try Tensor.init(allocator, shape);
             master_w[i].dtype = .fp32;
-            try master_w[i].fillRandomNormal(0.0, 0.02);
+            master_w[i].fillRandomNormal(0.0, 0.02);
+            init_master += 1;
 
             working_w[i] = try Tensor.init(allocator, shape);
             working_w[i].dtype = if (config.use_fp4) .fp4 else if (config.use_fp8) .fp8 else .fp16;
             try working_w[i].copyFromWithCast(&master_w[i]);
+            init_working += 1;
 
             accum_g[i] = try Tensor.init(allocator, shape);
             accum_g[i].dtype = .fp32;
-            try accum_g[i].fill(0.0);
-            initialized += 1;
+            accum_g[i].fill(0.0);
+            init_accum += 1;
         }
 
         return MixedPrecisionTrainer{
@@ -1049,7 +1200,7 @@ pub const MixedPrecisionTrainer = struct {
             .working_weights = working_w,
             .accumulated_gradients = accum_g,
             .accumulation_counter = 0,
-            .loss_scaler = DynamicLossScaler.init(config.loss_scale),
+            .loss_scaler = DynamicLossScaler.initWithMaxScale(config.loss_scale, config.max_loss_scale),
             .allocator = allocator,
         };
     }
@@ -1071,13 +1222,30 @@ pub const MixedPrecisionTrainer = struct {
         self.allocator.free(self.accumulated_gradients);
     }
 
+    pub fn accumulateGradient(self: *MixedPrecisionTrainer, grads: []const Tensor) !void {
+        if (grads.len != self.accumulated_gradients.len) return error.GradientCountMismatch;
+        const inv_scale = 1.0 / @max(self.loss_scaler.scale, 1e-8);
+        var i: usize = 0;
+        while (i < grads.len) : (i += 1) {
+            const src = grads[i];
+            if (!shapesEqual(src.shape, self.accumulated_gradients[i].shape)) return error.ShapeMismatch;
+            var j: usize = 0;
+            while (j < src.data.len) : (j += 1) {
+                self.accumulated_gradients[i].data[j] += src.data[j] * inv_scale;
+            }
+        }
+        self.accumulation_counter += 1;
+    }
+
     pub fn updateWeights(self: *MixedPrecisionTrainer, lr: f32) !void {
-        const accumulation_steps = @max(@as(usize, 1), self.config.gradient_accumulation_steps);
-        const scale = 1.0 / @as(f32, @floatFromInt(accumulation_steps));
+        const actual_steps = @max(@as(usize, 1), self.accumulation_counter);
+        const scale = 1.0 / @as(f32, @floatFromInt(actual_steps));
 
         for (self.accumulated_gradients) |*grad| {
-            try grad.mulScalar(scale);
+            grad.mulScalar(scale);
         }
+
+        self.loss_scaler.update(self.accumulated_gradients);
 
         var i: usize = 0;
         while (i < self.master_weights.len) : (i += 1) {
@@ -1085,7 +1253,10 @@ pub const MixedPrecisionTrainer = struct {
             var j: usize = 0;
             while (j < master.data.len) : (j += 1) {
                 const w = &master.data[j];
-                w.* -= lr * self.accumulated_gradients[i].data[j];
+                const grad_val = self.accumulated_gradients[i].data[j];
+                if (std.math.isFinite(grad_val)) {
+                    w.* -= lr * grad_val;
+                }
             }
         }
 
@@ -1096,7 +1267,7 @@ pub const MixedPrecisionTrainer = struct {
         }
 
         for (self.accumulated_gradients) |*grad| {
-            try grad.fill(0.0);
+            grad.fill(0.0);
         }
         self.accumulation_counter = 0;
     }
@@ -1111,6 +1282,7 @@ pub const B200OptimizationConfig = struct {
     multi_instance_gpu: bool = false,
     l2_cache_size_mb: usize = 50,
     tmem_size_mb: usize = 32,
+    tmem_access_freq_threshold: usize = 10,
 };
 
 pub const B200MemoryManager = struct {
@@ -1151,8 +1323,10 @@ pub const B200MemoryManager = struct {
             const tensor = tensors[i];
             const access_freq = access_pattern[i];
 
-            if (access_freq > 10 and self.config.use_tensor_memory) {
-                try self.moveToTensorMemory(tensor);
+            if (access_freq > self.config.tmem_access_freq_threshold and self.config.use_tensor_memory) {
+                self.moveToTensorMemory(tensor) catch |err| {
+                    if (err != error.OutOfTensorMemory) return err;
+                };
             }
         }
 
@@ -1174,7 +1348,7 @@ pub const B200MemoryManager = struct {
     fn moveToTensorMemory(self: *B200MemoryManager, tensor: *Tensor) !void {
         if (tensor.flags.in_tensor_memory) return;
         const tensor_size = tensor.data.len * @sizeOf(f32);
-        if (self.tensor_memory_used + tensor_size > self.tensor_memory_pool.len) return;
+        if (self.tensor_memory_used + tensor_size > self.tensor_memory_pool.len) return error.OutOfTensorMemory;
 
         const start = self.tensor_memory_used;
         const end = start + tensor_size;
@@ -1184,6 +1358,7 @@ pub const B200MemoryManager = struct {
     }
 
     fn compressIfBeneficial(self: *B200MemoryManager, tensor: *Tensor) !void {
+        if (tensor.flags.requires_grad) return;
         if (tensor.dtype == .fp32 and self.config.use_fp4_tensor_cores) {
             try tensor.convertToFP4();
         }
@@ -1242,7 +1417,7 @@ pub const B200KernelOptimizer = struct {
             }
         }
 
-        if (tensor_size > 100_000) {
+        if (operation == .matmul and tensor_size > 100_000) {
             return .fp8;
         }
 
@@ -1279,15 +1454,16 @@ pub const Prediction = struct {
 };
 
 pub const GaussianProcess = struct {
-    observations: []const Observation,
+    observations: []Observation,
     kernel_variance: f32,
     length_scale: f32,
     noise_variance: f32,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, obs: []const Observation) !GaussianProcess {
+        const owned = try allocator.dupe(Observation, obs);
         return GaussianProcess{
-            .observations = obs,
+            .observations = owned,
             .kernel_variance = 1.0,
             .length_scale = 0.1,
             .noise_variance = 0.01,
@@ -1296,7 +1472,7 @@ pub const GaussianProcess = struct {
     }
 
     pub fn deinit(self: *GaussianProcess) void {
-        _ = self;
+        self.allocator.free(self.observations);
     }
 
     pub fn expectedImprovement(self: *GaussianProcess, candidate: HyperparamConfig, best_score: f32) !f32 {
@@ -1378,19 +1554,20 @@ pub const GaussianProcess = struct {
         var col: usize = 0;
         while (col < n) : (col += 1) {
             var pivot_row = col;
-            var pivot_value = blk: { const v = a[col * n + col]; break :blk if (v >= 0) v else -v; };
+            var pivot_value = blk: {
+                const v = a[col * n + col];
+                break :blk if (v >= 0) v else -v;
+            };
             var row: usize = col + 1;
             while (row < n) : (row += 1) {
-                const candidate = blk: { const v = a[row * n + col]; break :blk if (v >= 0) v else -v; };
+                const candidate = blk: {
+                    const v = a[row * n + col];
+                    break :blk if (v >= 0) v else -v;
+                };
                 if (candidate > pivot_value) {
                     pivot_value = candidate;
                     pivot_row = row;
                 }
-            }
-
-            if (pivot_value < 1e-8) {
-                a[col * n + col] = 1e-8;
-                pivot_row = col;
             }
 
             if (pivot_row != col) {
@@ -1403,6 +1580,10 @@ pub const GaussianProcess = struct {
                 const tmp_b = b[col];
                 b[col] = b[pivot_row];
                 b[pivot_row] = tmp_b;
+            }
+
+            if (pivot_value < 1e-8) {
+                a[col * n + col] += 1e-8;
             }
 
             const pivot = a[col * n + col];
@@ -1428,7 +1609,13 @@ pub const GaussianProcess = struct {
             while (j < n) : (j += 1) {
                 sum -= a[idx * n + j] * solution[j];
             }
-            solution[idx] = sum / a[idx * n + idx];
+            const diag = a[idx * n + idx];
+            const abs_diag = if (diag < 0) -diag else diag;
+            if (abs_diag < 1e-12) {
+                solution[idx] = 0.0;
+            } else {
+                solution[idx] = sum / diag;
+            }
         }
 
         self.allocator.free(a);
@@ -1453,6 +1640,7 @@ pub const BayesianOptimizer = struct {
     observations: ArrayList(Observation),
     best_params: HyperparamConfig,
     best_score: f32,
+    num_candidates: usize,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, space: HyperparameterSpace) !BayesianOptimizer {
@@ -1466,6 +1654,7 @@ pub const BayesianOptimizer = struct {
                 .weight_decay = 0.01,
             },
             .best_score = std.math.inf(f32),
+            .num_candidates = 100,
             .allocator = allocator,
         };
     }
@@ -1483,11 +1672,10 @@ pub const BayesianOptimizer = struct {
         defer gp.deinit();
 
         var best_ei: f32 = -std.math.inf(f32);
-        var best_config: HyperparamConfig = undefined;
+        var best_config: HyperparamConfig = try self.sampleRandom();
 
-        const num_candidates: usize = 100;
         var i: usize = 0;
-        while (i < num_candidates) : (i += 1) {
+        while (i < self.num_candidates) : (i += 1) {
             const candidate = try self.sampleRandom();
             const ei = try gp.expectedImprovement(candidate, self.best_score);
 
@@ -1539,10 +1727,10 @@ pub const B200Profiler = struct {
     pub fn captureGPUMetrics(self: *B200Profiler) !GPUMetrics {
         _ = self;
         return GPUMetrics{
-            .utilization_percent = 85.0,
-            .memory_used_gb = 16.0,
-            .tensor_core_util = 90.0,
-            .nvlink_bandwidth_util = 75.0,
+            .utilization_percent = 0.0,
+            .memory_used_gb = 0.0,
+            .tensor_core_util = 0.0,
+            .nvlink_bandwidth_util = 0.0,
         };
     }
 };
@@ -1661,20 +1849,20 @@ pub const PerformanceMonitor = struct {
     fn computeMean(self: *PerformanceMonitor, values: []const f32) f32 {
         _ = self;
         if (values.len == 0) return 0.0;
-        var sum: f32 = 0.0;
+        var sum: f64 = 0.0;
         for (values) |v| {
-            sum += v;
+            sum += @as(f64, v);
         }
-        return sum / @as(f32, @floatFromInt(values.len));
+        return @floatCast(sum / @as(f64, @floatFromInt(values.len)));
     }
 
     fn computeSum(self: *PerformanceMonitor, values: []const f32) f32 {
         _ = self;
-        var sum: f32 = 0.0;
+        var sum: f64 = 0.0;
         for (values) |v| {
-            sum += v;
+            sum += @as(f64, v);
         }
-        return sum;
+        return @floatCast(sum);
     }
 };
 
@@ -1692,6 +1880,7 @@ pub const SFD = struct {
     allocator: Allocator,
     param_size: usize,
     initialized: bool,
+    use_external_fisher: bool,
 
     pub fn init(allocator: Allocator, param_size: usize) !SFD {
         return initWithConfig(allocator, param_size, .{});
@@ -1709,15 +1898,15 @@ pub const SFD = struct {
 
         var diag = try Tensor.init(allocator, &shape);
         errdefer diag.deinit();
-        try diag.fill(1.0);
+        diag.fill(1.0);
 
         var momentum = try Tensor.init(allocator, &shape);
         errdefer momentum.deinit();
-        try momentum.fill(0.0);
+        momentum.fill(0.0);
 
         var velocity = try Tensor.init(allocator, &shape);
         errdefer velocity.deinit();
-        try velocity.fill(0.0);
+        velocity.fill(0.0);
 
         return SFD{
             .fisher_diag = diag,
@@ -1733,6 +1922,7 @@ pub const SFD = struct {
             .allocator = allocator,
             .param_size = param_size,
             .initialized = true,
+            .use_external_fisher = config.use_external_fisher,
         };
     }
 
@@ -1805,10 +1995,12 @@ pub const SFD = struct {
             const sqrt_v = std.math.sqrt(@max(0.0, v_hat));
             const adaptive_lr = lr * warmup_factor / (sqrt_v + self.eps);
 
-            fisher_data[i] = self.beta2 * fisher_data[i] + (1.0 - self.beta2) * g * g;
-            fisher_data[i] = @min(fisher_data[i], self.fisher_max);
-            if (!std.math.isFinite(fisher_data[i])) {
-                fisher_data[i] = 1.0;
+            if (!self.use_external_fisher) {
+                fisher_data[i] = self.beta2 * fisher_data[i] + (1.0 - self.beta2) * g * g;
+                fisher_data[i] = @min(fisher_data[i], self.fisher_max);
+                if (!std.math.isFinite(fisher_data[i])) {
+                    fisher_data[i] = 1.0;
+                }
             }
 
             const sqrt_fisher = std.math.sqrt(@max(0.0, fisher_data[i]));
@@ -1852,16 +2044,20 @@ pub const SFD = struct {
     }
 
     pub fn spectralClip(self: *SFD, tensor: *Tensor, max_eig: f32) !void {
+        return self.spectralClipWithIters(tensor, max_eig, 100);
+    }
+
+    pub fn spectralClipWithIters(self: *SFD, tensor: *Tensor, max_eig: f32, power_iter: usize) !void {
         if (!self.initialized) return error.NotInitialized;
         if (!std.math.isFinite(max_eig) or max_eig <= 0.0) return error.InvalidMaxEig;
 
-        const current_max_ev = try tensor.spectralNorm(self.allocator, 100, 1e-6);
+        const current_max_ev = try tensor.spectralNorm(self.allocator, power_iter, 1e-6);
         if (!std.math.isFinite(current_max_ev) or current_max_ev <= 0.0) return;
 
         if (current_max_ev > max_eig) {
             const scale = max_eig / current_max_ev;
             if (std.math.isFinite(scale) and scale > 0.0) {
-                try tensor.mulScalar(scale);
+                tensor.mulScalar(scale);
             }
         }
     }
@@ -1913,7 +2109,7 @@ pub const SFD = struct {
             const scale = max_norm / (total_norm + self.eps);
             if (std.math.isFinite(scale) and scale > 0.0) {
                 for (grads) |grad| {
-                    grad.mulScalar(scale) catch {};
+                    grad.mulScalar(scale);
                 }
             }
         }
@@ -1971,7 +2167,9 @@ pub const SFD = struct {
         const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
         defer file.close();
 
-        var reader = file.reader();
+        var buffered = std.io.bufferedReader(file.reader());
+        var reader = buffered.reader();
+
         const magic = try reader.readInt(u32, .little);
         if (magic != 0x53464431) return error.InvalidStateFormat;
 
@@ -1984,7 +2182,13 @@ pub const SFD = struct {
         const param_size_u64 = try reader.readInt(u64, .little);
         const step_count_u64 = try reader.readInt(u64, .little);
 
-        if (warmup_steps_u64 > std.math.maxInt(usize) or param_size_u64 > std.math.maxInt(usize) or step_count_u64 > std.math.maxInt(usize)) return error.InvalidStateFormat;
+        if (beta1 <= 0.0 or beta1 >= 1.0) return error.InvalidStateFormat;
+        if (beta2 <= 0.0 or beta2 >= 1.0) return error.InvalidStateFormat;
+        if (eps <= 0.0 or !std.math.isFinite(eps)) return error.InvalidStateFormat;
+        if (clip_threshold <= 0.0 or !std.math.isFinite(clip_threshold)) return error.InvalidStateFormat;
+        if (fisher_max <= 0.0 or !std.math.isFinite(fisher_max)) return error.InvalidStateFormat;
+
+        if (warmup_steps_u64 > @as(u64, std.math.maxInt(usize)) or param_size_u64 > @as(u64, std.math.maxInt(usize)) or step_count_u64 > @as(u64, std.math.maxInt(usize))) return error.InvalidStateFormat;
         if (@as(usize, @intCast(param_size_u64)) != self.param_size) return error.ShapeMismatch;
 
         var loaded_fisher = try Tensor.load(self.allocator, reader);
@@ -2021,7 +2225,9 @@ pub const SFD = struct {
 
         var i: usize = 0;
         while (i < count) : (i += 1) {
-            const combined = (fisher_data[i] + prev_data[i]) * 0.5;
+            const prev = prev_data[i];
+            if (!std.math.isFinite(prev) or prev < 0.0) continue;
+            const combined = (fisher_data[i] + prev) * 0.5;
             fisher_data[i] = @min(combined, self.fisher_max);
         }
     }
@@ -2055,7 +2261,7 @@ pub const SFD = struct {
             mean_grad.data[i] /= divisor;
             second_moment.data[i] /= divisor;
             const variance = @max(0.0, second_moment.data[i] - mean_grad.data[i] * mean_grad.data[i]);
-            self.fisher_diag.data[i] = @max(0.0, self.fisher_diag.data[i] - variance);
+            self.fisher_diag.data[i] = @max(1e-8, self.fisher_diag.data[i] - variance);
         }
     }
 };
@@ -2065,6 +2271,8 @@ pub const SophiaSOAPConfig = struct {
     gamma: f32 = 0.01,
     hessian_update_freq: usize = 10,
     use_gauss_newton: bool = true,
+    kfac_damping: f32 = 0.001,
+    hessian_ema_alpha: f32 = 0.9,
 };
 
 pub const SophiaSOAPOptimizer = struct {
@@ -2096,24 +2304,24 @@ pub const SophiaSOAPOptimizer = struct {
         var i: usize = 0;
         while (i < layer_dims.len) : (i += 1) {
             const dims = layer_dims[i];
-            kfac_blocks[i] = try KFACBlock.init(allocator, dims[0], dims[1], 0.001);
+            kfac_blocks[i] = try KFACBlock.init(allocator, dims[0], dims[1], sophia_config.kfac_damping);
             initialized_blocks += 1;
         }
 
         const shape = [_]usize{param_size};
         var hess_diag = try Tensor.init(allocator, &shape);
         errdefer hess_diag.deinit();
-        try hess_diag.fill(1.0);
+        hess_diag.fill(1.0);
 
         var hutch_vec = try Tensor.init(allocator, &shape);
         errdefer hutch_vec.deinit();
-        try hutch_vec.fillRademacher();
+        hutch_vec.fillRademacher();
 
         var param_shapes = try allocator.alloc([]const usize, 1);
         defer allocator.free(param_shapes);
         param_shapes[0] = &shape;
 
-        var vr = try MARSVarianceReducer.init(allocator, param_shapes);
+        var vr = try MARSVarianceReducer.init(allocator, param_shapes, .{});
         errdefer vr.deinit();
 
         return SophiaSOAPOptimizer{
@@ -2142,6 +2350,9 @@ pub const SophiaSOAPOptimizer = struct {
     }
 
     pub fn update(self: *SophiaSOAPOptimizer, gradients: *const Tensor, params: *Tensor, activations: []const Tensor, lr: f32) !void {
+        var original_grad = try gradients.clone(self.allocator);
+        defer original_grad.deinit();
+
         var hybrid_grad = try gradients.clone(self.allocator);
         defer hybrid_grad.deinit();
 
@@ -2149,7 +2360,7 @@ pub const SophiaSOAPOptimizer = struct {
         while (i < self.kfac_blocks.len) : (i += 1) {
             const block = &self.kfac_blocks[i];
             if (i < activations.len) {
-                try block.updateStatistics(&activations[i], &hybrid_grad);
+                try block.updateStatistics(&activations[i], &original_grad);
 
                 if (self.sfd.step_count % block.update_freq == 0) {
                     try block.preconditionGradient(&hybrid_grad);
@@ -2158,7 +2369,7 @@ pub const SophiaSOAPOptimizer = struct {
         }
 
         if (self.config.hessian_update_freq > 0 and self.sfd.step_count % self.config.hessian_update_freq == 0) {
-            try self.updateHessianDiagonal(params, &hybrid_grad);
+            try self.updateHessianDiagonal(params, &original_grad);
         }
 
         {
@@ -2167,15 +2378,13 @@ pub const SophiaSOAPOptimizer = struct {
                 const g = hybrid_grad.data[pi];
                 const h = self.hessian_diag.data[pi];
 
-                const abs_h = if (h < 0) -h else h;
-                const h_clipped = @max(abs_h, self.config.gamma);
-                const step_update = lr * g / h_clipped;
-
                 if (self.config.use_gauss_newton) {
                     const gn_h = @max(h, self.config.gamma);
                     params.data[pi] -= lr * g / gn_h;
                 } else {
-                    params.data[pi] -= step_update;
+                    const abs_h = if (h < 0) -h else h;
+                    const h_clipped = @max(abs_h, self.config.gamma);
+                    params.data[pi] -= lr * g / h_clipped;
                 }
             }
         }
@@ -2186,17 +2395,16 @@ pub const SophiaSOAPOptimizer = struct {
 
     fn updateHessianDiagonal(self: *SophiaSOAPOptimizer, params: *const Tensor, grad: *const Tensor) !void {
         _ = params;
-        try self.hutchinson_vector.fillRademacher();
+        self.hutchinson_vector.fillRademacher();
 
-        const eps: f32 = @max(self.config.rho, 1e-6);
-        const alpha: f32 = 0.9;
+        const alpha: f32 = self.config.hessian_ema_alpha;
 
         var i: usize = 0;
         while (i < self.hessian_diag.data.len and i < grad.data.len) : (i += 1) {
             const h = &self.hessian_diag.data[i];
             const g = grad.data[i];
             const direction = self.hutchinson_vector.data[i];
-            const gd = g * direction; const curvature = (g * g + (if (gd >= 0) gd else -gd) * eps) / eps;
+            const curvature = g * direction;
             h.* = alpha * h.* + (1.0 - alpha) * curvature;
 
             if (self.config.use_gauss_newton) {
@@ -2205,8 +2413,6 @@ pub const SophiaSOAPOptimizer = struct {
         }
     }
 };
-
-pub const SFDOptimizer = SFD;
 
 test "SFD init and deinit" {
     const gpa = std.testing.allocator;
@@ -2234,12 +2440,12 @@ test "SFD update" {
     var params = try Tensor.init(gpa, &shape);
     defer params.deinit();
 
-    for (params.data) |*v| {
-        v.* = 0.0;
-    }
+    params.fill(0.0);
 
     try sfd.update(&grads, &params, 0.1);
-    try std.testing.expect(params.data[0] < 0);
+    for (params.data) |v| {
+        try std.testing.expect(v < 0);
+    }
 }
 
 test "Tensor clone" {
@@ -2248,12 +2454,13 @@ test "Tensor clone" {
     var t1 = try Tensor.init(gpa, &shape);
     defer t1.deinit();
 
-    try t1.fill(5.0);
+    t1.fill(5.0);
 
     var t2 = try t1.clone(gpa);
     defer t2.deinit();
 
     try std.testing.expectEqual(t1.data[0], t2.data[0]);
+    try std.testing.expectEqual(false, t2.flags.in_tensor_memory);
 }
 
 test "KFACBlock init" {
@@ -2262,19 +2469,30 @@ test "KFACBlock init" {
     defer block.deinit();
 
     try std.testing.expectEqual(@as(f32, 0.001), block.damping);
+    try std.testing.expectEqual(@as(f32, 0.95), block.alpha);
 }
 
-test "SpectralNormalizer" {
-    const normalizer = SpectralNormalizer.init(10);
-    try std.testing.expectEqual(@as(usize, 10), normalizer.power_iterations);
+test "SpectralNormalizer normalizeWeights" {
+    const gpa = std.testing.allocator;
+    var normalizer = SpectralNormalizer.init(10);
+    const shape = [_]usize{ 4, 4 };
+    var w = try Tensor.init(gpa, &shape);
+    defer w.deinit();
+    w.fillRandomNormal(0.0, 2.0);
+    try normalizer.normalizeWeights(&w, gpa);
+    const sigma = try w.spectralNorm(gpa, 20, 1e-6);
+    try std.testing.expect(sigma <= normalizer.max_singular_value + 1e-3);
 }
 
-test "LRScheduler cosine annealing" {
+test "LRScheduler cosine annealing full schedule" {
     const gpa = std.testing.allocator;
     var scheduler = LRScheduler.init(gpa, .cosine_annealing, 0.1, 10, 100);
-
-    const lr = try scheduler.getLearningRate(null);
-    try std.testing.expect(lr >= 0.0 and lr <= 0.1);
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        const lr = try scheduler.getLearningRate(null);
+        scheduler.step();
+        try std.testing.expect(lr >= 0.0 and lr <= scheduler.base_lr + 1e-6);
+    }
 }
 
 test "BayesianOptimizer init" {
@@ -2286,6 +2504,18 @@ test "BayesianOptimizer init" {
     try std.testing.expect(config.lr >= 1e-6 and config.lr <= 1e-2);
 }
 
+test "BayesianOptimizer GP suggestion" {
+    const gpa = std.testing.allocator;
+    var opt = try BayesianOptimizer.init(gpa, .{});
+    defer opt.deinit();
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        try opt.observe(.{ .lr = 0.001, .beta1 = 0.9, .beta2 = 0.999, .weight_decay = 0.01 }, @as(f32, @floatFromInt(i)) * 0.1);
+    }
+    const config = try opt.suggestNext();
+    try std.testing.expect(config.lr >= 1e-6 and config.lr <= 1e-2);
+}
+
 test "SophiaSOAPOptimizer init" {
     const gpa = std.testing.allocator;
     const layer_dims = [_][2]usize{[_]usize{ 4, 4 }};
@@ -2293,4 +2523,20 @@ test "SophiaSOAPOptimizer init" {
     defer opt.deinit();
 
     try std.testing.expect(opt.sfd.initialized);
+}
+
+test "DynamicLossScaler custom max scale" {
+    var scaler = DynamicLossScaler.initWithMaxScale(1024.0, 32768.0);
+    try std.testing.expectEqual(@as(f32, 32768.0), scaler.max_scale);
+}
+
+test "MARSVarianceReducer config" {
+    const gpa = std.testing.allocator;
+    const shape = [_]usize{4};
+    const shapes = [_][]const usize{&shape};
+    var mars = try MARSVarianceReducer.init(gpa, &shapes, .{ .momentum = 0.5, .scale_factor = 2.0, .snapshot_freq = 50 });
+    defer mars.deinit();
+    try std.testing.expectEqual(@as(f32, 0.5), mars.momentum);
+    try std.testing.expectEqual(@as(f32, 2.0), mars.scale_factor);
+    try std.testing.expectEqual(@as(usize, 50), mars.snapshot_freq);
 }
