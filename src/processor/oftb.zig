@@ -19,22 +19,12 @@ pub const OFTB = struct {
         const x1 = x.data[0..half];
         const x2 = x.data[half .. half * 2];
 
-        var mix_buf: [16384]f32 = undefined;
-        if (half > mix_buf.len) return;
-
         var i: usize = 0;
         while (i < half) : (i += 1) {
-            mix_buf[i] = x1[i];
-        }
-
-        i = 0;
-        while (i < half) : (i += 1) {
-            x1[i] += x2[i] * self.fractal_scale;
-        }
-
-        i = 0;
-        while (i < half) : (i += 1) {
-            x2[i] += mix_buf[i] * self.fractal_scale * 0.5;
+            const a = x1[i];
+            const b = x2[i];
+            x1[i] = (a - b) * self.fractal_scale;
+            x2[i] = (a + b) * self.fractal_scale;
         }
     }
 
@@ -44,22 +34,12 @@ pub const OFTB = struct {
         const g1 = grad[0..half];
         const g2 = grad[half .. half * 2];
 
-        var buf: [16384]f32 = undefined;
-        if (half > buf.len) return;
-
         var i: usize = 0;
         while (i < half) : (i += 1) {
-            buf[i] = g2[i];
-        }
-
-        i = 0;
-        while (i < half) : (i += 1) {
-            g2[i] += g1[i] * self.fractal_scale;
-        }
-
-        i = 0;
-        while (i < half) : (i += 1) {
-            g1[i] += buf[i] * self.fractal_scale * 0.5;
+            const a = g1[i];
+            const b = g2[i];
+            g1[i] = (a + b) * self.fractal_scale;
+            g2[i] = (-a + b) * self.fractal_scale;
         }
     }
 };
