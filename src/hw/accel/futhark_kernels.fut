@@ -116,6 +116,10 @@ let rsf_forward_layer [half] (x: [half*2]f32) (s_weight: [half][half]f32) (t_wei
   let scattered = rsf_scatter x perm_indices
   in rsf_flow scattered s_weight t_weight s_bias t_bias
 
+let rsf_forward_multi [num_layers][half] (x: [half*2]f32) (s_ws: [num_layers][half][half]f32) (t_ws: [num_layers][half][half]f32) (s_bs: [num_layers][half]f32) (t_bs: [num_layers][half]f32) (perms: [num_layers][half*2]i64): [half*2]f32 =
+  loop acc = x for i < num_layers do
+    rsf_forward_layer acc s_ws[i] t_ws[i] s_bs[i] t_bs[i] perms[i]
+
 let rsf_backward_scatter [n] (grad: [n]f32) (indices: [n]i64): [n]f32 =
   if n < 2 then copy grad
   else
@@ -314,6 +318,7 @@ entry select_topk [n] (k: i64) (scores: [n]f32): ([]f32, []i64) =
   in topk safe_k scores (iota n)
 
 entry rsf_forward [half] (x: [half*2]f32) (s_w: [half][half]f32) (t_w: [half][half]f32) (s_b: [half]f32) (t_b: [half]f32) (perm: [half*2]i64): [half*2]f32 = rsf_forward_layer x s_w t_w s_b t_b perm
+entry rsf_forward_multilayer [num_layers][half] (x: [half*2]f32) (s_ws: [num_layers][half][half]f32) (t_ws: [num_layers][half][half]f32) (s_bs: [num_layers][half]f32) (t_bs: [num_layers][half]f32) (perms: [num_layers][half*2]i64): [half*2]f32 = rsf_forward_multi x s_ws t_ws s_bs t_bs perms
 entry rsf_backward [half] (grad: [half*2]f32) (x: [half*2]f32) (s_w: [half][half]f32) (t_w: [half][half]f32) (s_b: [half]f32) (t_b: [half]f32) (perm: [half*2]i64): ([half*2]f32, [half][half]f32, [half][half]f32, [half]f32, [half]f32) = rsf_backward_layer grad x s_w t_w s_b t_b perm
 
 entry ssi_hash_tokens [m] (tokens: [m]u32): u64 = hash_sequence tokens
