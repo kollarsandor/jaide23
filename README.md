@@ -1,6 +1,6 @@
 ## JAIDE projekt áttekintése
 
-A JAIDE rendszer egy következő generációs nagy nyelvi modell (LLM) keretrendszer, amelyet úgy terveztek, hogy megkerülje a Transformer architektúra alapvető méretezési korlátait. Az elsősorban Zig-ben épülő JAIDE bevezeti a Reversible Scatter Flow (RSF) architektúrát, amely a memóriaigényes önmegfigyelési mechanizmust bijektív csatolási rétegekkel és fraktálkeveréssel helyettesíti. Ez a kialakítás O(1) memóriakomplexitást tesz lehetővé a visszafelé haladás során, lehetővé téve a rendkívül mély hálózatok (10 000+ réteg) képzését alaphardveren.
+A JAIDE rendszer egy következő generációs nagy nyelvi modell (LLM), amelyet úgy terveztek, hogy megkerülje a Transformer architektúra alapvető méretezési korlátait. Az elsősorban Zig-ben épülő JAIDE bevezeti a Reversible Scatter Flow (RSF) architektúrát, amely a memóriaigényes önmegfigyelési mechanizmust bijektív csatolási rétegekkel és fraktálkeveréssel helyettesíti. Ez a kialakítás O(1) memóriakomplexitást tesz lehetővé a visszafelé haladás során, lehetővé téve a rendkívül mély hálózatok (10 000+ réteg) képzését alaphardveren.
 
 ### Építészetfilozófia: Paradigma
 
