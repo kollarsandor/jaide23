@@ -302,6 +302,11 @@ const LayerCore = struct {
         if (twg_new) |t| self.t_weight_grad = t;
         if (sbg_new) |t| self.s_bias_grad = t;
         if (tbg_new) |t| self.t_bias_grad = t;
+
+        swg_new = null;
+        twg_new = null;
+        sbg_new = null;
+        tbg_new = null;
     }
 
     fn zeroGradients(self: *LayerCore) void {
@@ -1270,7 +1275,7 @@ fn validateF16Convertible(data: []const f32) !void {
     const max_f16 = std.math.floatMax(f16);
     for (data) |v| {
         if (!std.math.isFinite(v)) return error.NonFinite;
-        if ((if (v >= 0) v else -v) > max_f16) return error.NumericFailure;
+        if (@abs(v) > max_f16) return error.NumericFailure;
     }
 }
 
@@ -1318,10 +1323,12 @@ fn syncAllLayersGPU(core: *RSFCore) !void {
     }
 
     var local_f16 = try core.allocator.alloc(f16, dim_sq);
-    errdefer core.allocator.free(local_f16);
+    var local_f16_owned = true;
+    errdefer if (local_f16_owned) core.allocator.free(local_f16);
 
     var staged_accel = accel.RSFAccelerator.init(core.dim) catch return error.NoGPUAvailable;
-    errdefer staged_accel.deinit();
+    var staged_owned = true;
+    errdefer if (staged_owned) staged_accel.deinit();
 
     try staged_accel.setClipRange(@floatCast(core.cfg.clip_min), @floatCast(core.cfg.clip_max));
 
@@ -1335,7 +1342,9 @@ fn syncAllLayersGPU(core: *RSFCore) !void {
     if (core.f16_buf) |buf| core.allocator.free(buf);
 
     core.gpu_accel = staged_accel;
+    staged_owned = false;
     core.f16_buf = local_f16;
+    local_f16_owned = false;
     core.gpu_weight_version = core.cpu_weight_version;
     core.gpu_available.store(1, .monotonic);
     success = true;
@@ -1445,7 +1454,7 @@ const SavedModelSnapshot = struct {
             layer.t_bias.deinit();
         }
         self.allocator.free(self.layers);
-        self.layers = self.layers[0..0];
+        self.layers = &[_]SavedLayerSnapshot{};
     }
 };
 
@@ -1626,18 +1635,25 @@ pub const RSF = struct {
         if (x.shape.dims[0] == 0) return error.InvalidBatchSize;
 
         if (comptime accel.gpu_enabled) {
-            core.rwlock.lock();
-            defer core.rwlock.unlock();
+            const needs_write = modelGPUCompatible(core) or core.gpu_available.load(.monotonic) != 0 or core.gpu_accel != null or core.f16_buf != null or core.gpu_weight_version != 0;
+            if (needs_write) {
+                core.rwlock.lock();
+                defer core.rwlock.unlock();
 
-            if (modelGPUCompatible(core)) {
-                if (try tryForwardGPU(core, x)) return;
-                syncAllLayersGPU(core) catch {};
-                if (try tryForwardGPU(core, x)) return;
-            } else if (core.gpu_available.load(.monotonic) != 0 or core.gpu_accel != null or core.f16_buf != null or core.gpu_weight_version != 0) {
-                disableGPU(core);
+                if (modelGPUCompatible(core)) {
+                    if (try tryForwardGPU(core, x)) return;
+                    syncAllLayersGPU(core) catch {};
+                    if (try tryForwardGPU(core, x)) return;
+                } else if (core.gpu_available.load(.monotonic) != 0 or core.gpu_accel != null or core.f16_buf != null or core.gpu_weight_version != 0) {
+                    disableGPU(core);
+                }
+
+                try forwardOnCore(core, x);
+            } else {
+                core.rwlock.lockShared();
+                defer core.rwlock.unlockShared();
+                try forwardOnCore(core, x);
             }
-
-            try forwardOnCore(core, x);
         } else {
             core.rwlock.lockShared();
             defer core.rwlock.unlockShared();
@@ -1945,12 +1961,12 @@ fn shouldDestroyModelHandle(self: *RSF) bool {
 }
 
 fn crcUpdateU32LE(hasher: *std.hash.Crc32, v: u32) void {
-    var le = std.mem.nativeToLittle(u32, v);
+    const le = std.mem.nativeToLittle(u32, v);
     hasher.update(std.mem.asBytes(&le));
 }
 
 fn crcUpdateU64LE(hasher: *std.hash.Crc32, v: u64) void {
-    var le = std.mem.nativeToLittle(u64, v);
+    const le = std.mem.nativeToLittle(u64, v);
     hasher.update(std.mem.asBytes(&le));
 }
 
@@ -2129,5 +2145,4 @@ fn writeSnapshotVersion4ToPath(snapshot: *const SavedModelSnapshot, path: []cons
 
     try parent_dir.rename(temp.tmp_name, base_name);
     tmp_exists = false;
-    try parent_dir.sync();
 }
